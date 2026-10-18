@@ -1,0 +1,230 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+enum TaskStatus {
+  QUEUED
+  RUNNING
+  WAITING_FOR_APPROVAL
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum EvaluationStatus {
+  PASS
+  WARN
+  BLOCK
+  ERROR
+}
+
+model User {
+  // Must match the UUID of the authenticated user in Supabase Auth.
+  // Do not generate a separate ID for this record.
+  id        String   @id @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships      WorkspaceMember[]
+  createdWorkspaces Workspace[] @relation("WorkspaceCreator")
+  conversations    Conversation[] @relation("ConversationCreator")
+  messages         Message[] @relation("MessageSender")
+  requestedTasks   Task[] @relation("TaskRequester")
+  decidedApprovals Approval[] @relation("ApprovalDecider")
+  auditEntries     AuditLog[] @relation("AuditActor")
+}
+
+model Workspace {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  rootPath    String
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy    User              @relation("WorkspaceCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  members      WorkspaceMember[]
+  conversations Conversation[]
+
+  @@index([createdById, updatedAt])
+  @@index([updatedAt])
+}
+
+model WorkspaceMember {
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole @default(DEVELOPER)
+  joinedAt    DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@index([userId, role])
+}
+
+model Conversation {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  createdById String   @db.Uuid
+  title       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  messages  Message[]
+  tasks     Task[]
+
+  @@index([workspaceId, updatedAt])
+  @@index([createdById, createdAt])
+}
+
+model Message {
+  id              String      @id @default(uuid()) @db.Uuid
+  conversationId  String      @db.Uuid
+  senderId        String?     @db.Uuid
+  role            MessageRole
+  content         String      @db.Text
+  clientRequestId String?
+  createdAt       DateTime    @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?        @relation("MessageSender", fields: [senderId], references: [id], onDelete: SetNull)
+  task         Task?
+
+  @@unique([conversationId, clientRequestId])
+  @@index([conversationId, createdAt])
+  @@index([senderId, createdAt])
+}
+
+model Task {
+  id              String     @id @default(uuid()) @db.Uuid
+  conversationId  String     @db.Uuid
+  messageId       String     @unique @db.Uuid
+  requestedById   String     @db.Uuid
+  status          TaskStatus @default(QUEUED)
+  cancelRequested Boolean    @default(false)
+  errorCode       String?
+  errorMessage    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message      Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  requestedBy  User         @relation("TaskRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  events       TaskEvent[]
+  approvals    Approval[]
+  evaluations  PackageEvaluation[]
+
+  @@index([status, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([requestedById, createdAt])
+}
+
+model TaskEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  taskId    String   @db.Uuid
+  sequence  Int
+  type      String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, sequence])
+  @@index([taskId, createdAt])
+}
+
+model Approval {
+  id               String         @id @default(uuid()) @db.Uuid
+  taskId           String         @db.Uuid
+  status           ApprovalStatus @default(PENDING)
+  actionType       String
+  resource         String
+  requestedVersion String?
+  decisionReason   String?
+  decidedById      String?        @db.Uuid
+  decidedAt        DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime       @default(now())
+
+  task      Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  decidedBy User? @relation("ApprovalDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@index([taskId, status])
+  @@index([status, createdAt])
+  @@index([decidedById, decidedAt])
+}
+
+model PackageEvaluation {
+  id               String           @id @default(uuid()) @db.Uuid
+  taskId           String           @db.Uuid
+  ecosystem        String
+  packageName      String
+  requestedVersion String?
+  resolvedVersion  String?
+  status           EvaluationStatus
+  necessity        String?
+  riskScore        Float?
+  findings         Json
+  evidence         Json
+  createdAt        DateTime         @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+  @@index([ecosystem, packageName])
+}
+
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  actorId      String?  @db.Uuid
+  actorType    String
+  action       String
+  resourceType String
+  resourceId   String?
+  metadata     Json
+  createdAt    DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([resourceType, resourceId])
+}
