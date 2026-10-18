@@ -11,28 +11,45 @@
   ],
   "activationEvents": [
     "onCommand:sads-agent.helloWorld",
+    "onCommand:sads-agent.openChat",
     "onView:sads.chatView"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sads",
+          "title": "SADS",
+          "icon": "media/sads.svg"
+        }
+      ]
+    },
+  "views": {
+    "sads": [
+      {
+        "id": "sads.chatView",
+        "name": "SADS Assistant",
+        "type": "webview"
+      }
+    ]
+  },
     "commands": [
       {
         "command": "sads-agent.helloWorld",
         "title": "SADS: Test Extension Command"
+      },
+      {
+        "command": "sads-agent.openChat",
+        "title": "SADS: Open Assistant"
       }
-    ],
-    "views": {
-      "explorer": [
-        {
-            "id": "sads.chatView",
-            "name": "SADS Assistant"
-        }
-      ]
-    }
+    ]
+
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "build:webview": "npm --prefix webview-ui run build",
+    "compile": "npm run build:webview && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
