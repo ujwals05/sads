@@ -26,34 +26,49 @@ export const signRefreshToken = (payload: JwtPayLoad): string => {
     return jwt.sign(payload, secret, options)
 }
 
+
 export const verifyAccessToken = (token: string): JwtPayLoad => {
-    const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET);
+  const decoded: unknown = jwt.verify(
+    token,
+    env.JWT_ACCESS_SECRET,
+  );
 
-    if (
-        typeof decoded !== "object" ||
-        decoded === null ||
-        !("userId" in decoded) ||
-        !("email" in decoded) ||
-        !("role" in decoded)
-    ) {
-        throw new Error("Invalid token structure");
-    }
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    !("id" in decoded) ||
+    typeof decoded.id !== "string" ||
+    !("email" in decoded) ||
+    typeof decoded.email !== "string"
+  ) {
+    throw new Error("Invalid access token structure");
+  }
 
-    return decoded as JwtPayLoad;
-}
+  return {
+    id: decoded.id,
+    email: decoded.email,
+  };
+};
 
 export const verifyRefreshToken = (token: string): JwtPayLoad => {
-    const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET)
+  const decoded: unknown = jwt.verify(
+    token,
+    env.JWT_REFRESH_SECRET,
+  );
 
-    if (
-        typeof decoded !== "object" ||
-        decoded === null ||
-        !("userId" in decoded) ||
-        !("email" in decoded) ||
-        !("role" in decoded)
-    ) {
-        throw new Error("Invalid token structure")
-    }
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    !("id" in decoded) ||
+    typeof decoded.id !== "string" ||
+    !("email" in decoded) ||
+    typeof decoded.email !== "string"
+  ) {
+    throw new Error("Invalid refresh token structure");
+  }
 
-    return decoded as JwtPayLoad
-}
+  return {
+    id: decoded.id,
+    email: decoded.email,
+  };
+};
