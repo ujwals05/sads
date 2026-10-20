@@ -1,12 +1,12 @@
 
 import type { NextFunction, Request, Response } from "express";
 
-import { supabase } from "../integrations/supabase/client.js";
-import { userService } from "../modules/users/user.service.js";
+import { verifyAccessToken } from "../utils/jwt.js";
+import { authRepository } from "../modules/users/auth.repository.js";
 
 export interface AuthenticatedUser {
   id: string;
-  email: string | null;
+  email: string;
 }
 
 declare global {
@@ -46,26 +46,37 @@ export async function authenticate(
     return;
   }
 
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
+  let payload;
 
-    if (error || !data.user) {
+  try {
+    payload = verifyAccessToken(token);
+  } catch {
+    res.status(401).json({
+      error: {
+        code: "INVALID_TOKEN",
+        message: "The access token is invalid or expired.",
+      },
+    });
+    return;
+  }
+
+  try {
+    // Load the current user from our own database.
+    const user = await authRepository.findUserById(payload.id);
+
+    if (!user) {
       res.status(401).json({
         error: {
           code: "INVALID_TOKEN",
-          message: "The access token is invalid or expired.",
+          message: "The user associated with this token no longer exists.",
         },
       });
       return;
     }
 
-    const user = await userService.provisionAuthenticatedUser(
-      data.user.id,
-    );
-
     req.authUser = {
       id: user.id,
-      email: data.user.email ?? null,
+      email: user.email,
     };
 
     next();
@@ -73,3 +84,4 @@ export async function authenticate(
     next(error);
   }
 }
+  
