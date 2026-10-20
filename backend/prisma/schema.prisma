@@ -51,21 +51,26 @@ enum EvaluationStatus {
   ERROR
 }
 
-model User {
-  // Must match the UUID of the authenticated user in Supabase Auth.
-  // Do not generate a separate ID for this record.
-  id        String   @id @db.Uuid
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 
-  memberships      WorkspaceMember[]
-  createdWorkspaces Workspace[] @relation("WorkspaceCreator")
-  conversations    Conversation[] @relation("ConversationCreator")
-  messages         Message[] @relation("MessageSender")
-  requestedTasks   Task[] @relation("TaskRequester")
-  decidedApprovals Approval[] @relation("ApprovalDecider")
-  auditEntries     AuditLog[] @relation("AuditActor")
+model User {
+  id                    String    @id @db.Uuid
+  email                 String    @unique
+  passwordHash          String
+  refreshTokenHash      String?
+  refreshTokenExpiresAt DateTime?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  memberships           WorkspaceMember[]
+  createdWorkspaces     Workspace[] @relation("WorkspaceCreator")
+  conversations         Conversation[] @relation("ConversationCreator")
+  messages              Message[] @relation("MessageSender")
+  requestedTasks        Task[] @relation("TaskRequester")
+  decidedApprovals      Approval[] @relation("ApprovalDecider")
+  auditEntries          AuditLog[] @relation("AuditActor")
 }
+
 
 model Workspace {
   id          String   @id @default(uuid()) @db.Uuid
