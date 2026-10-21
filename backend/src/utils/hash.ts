@@ -6,6 +6,6 @@ export const hashedPassword = async (passowrd: string): Promise<string> => {
     return bcrypt.hash(passowrd, SALT_ROUNDS)
 }
 
-export const comparePassword = async (plain: string, hashed: string): Promise<Boolean> => {
+export const comparePassword = async (plain: string, hashed: string): Promise<boolean> => {
     return bcrypt.compare(plain, hashed)
 }

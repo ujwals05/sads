@@ -2,7 +2,7 @@
 import type { NextFunction, Request, Response } from "express";
 
 import { verifyAccessToken } from "../utils/jwt.js";
-import { authRepository } from "../modules/users/auth.repository.js";
+import { authRepository } from "../modules/auth/auth.repository.js";
 
 export interface AuthenticatedUser {
   id: string;
