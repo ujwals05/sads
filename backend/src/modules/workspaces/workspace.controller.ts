@@ -5,6 +5,7 @@ import {
   createWorkspaceSchema,
   updateWorkspaceSchema,
   workspaceParamsSchema,
+  addWorkspaceMemberSchema,
 } from "./workspace.validation.js";
 import {
   WorkspaceServiceError,
@@ -188,4 +189,35 @@ export const workspaceController = {
       return handleError(error, res);
     }
   },
+  async addMember(req: Request, res: Response) {
+  const userId = getUserId(req);
+  const params = workspaceParamsSchema.safeParse(req.params);
+  const body = addWorkspaceMemberSchema.safeParse(req.body);
+
+  if (!userId) {
+    return res.status(401).json({
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Authentication required.",
+      },
+    });
+  }
+
+  if (!params.success || !body.success) {
+    return sendValidationError(res, "Invalid member data.");
+  }
+
+  try {
+    const member = await workspaceService.addMember(
+      params.data.workspaceId,
+      userId,
+      body.data,
+    );
+
+    return res.status(201).json({ data: member });
+  } catch (error) {
+    return handleError(error, res);
+  }
+},
+
 };

@@ -77,4 +77,42 @@ export const workspaceRepository = {
       where: { id: workspaceId },
     });
   },
+  
+  addMember(
+    workspaceId: string,
+    userId: string,
+    role: "ADMIN" | "DEVELOPER" | "VIEWER",
+  ) {
+    return prisma.workspaceMember.create({
+      data: {
+        workspaceId,
+        userId,
+        role,
+      },
+      select: {
+        workspaceId: true,
+        userId: true,
+        role: true,
+        joinedAt: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
+    });
+  },
+  
+  findUserById(userId: string) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+    },
+  });
+},
+
+
 };

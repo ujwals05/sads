@@ -12,3 +12,5 @@ workspaceRouter.get("/", workspaceController.list);
 workspaceRouter.get("/:workspaceId", workspaceController.get);
 workspaceRouter.patch("/:workspaceId", workspaceController.update);
 workspaceRouter.delete("/:workspaceId", workspaceController.delete);
+
+workspaceRouter.post("/:workspaceId/members",workspaceController.addMember);

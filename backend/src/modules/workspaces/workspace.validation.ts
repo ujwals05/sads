@@ -44,3 +44,8 @@ export type CreateWorkspaceInput = z.infer<
 export type UpdateWorkspaceInput = z.infer<
   typeof updateWorkspaceSchema
 >;
+
+export const addWorkspaceMemberSchema = z.object({
+  userId: z.string().uuid(),
+  role: z.enum(["ADMIN", "DEVELOPER", "VIEWER"]),
+});

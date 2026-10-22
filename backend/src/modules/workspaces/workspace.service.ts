@@ -94,4 +94,61 @@ export const workspaceService = {
 
     return workspaceRepository.delete(workspaceId);
   },
+
+  
+async addMember(
+  workspaceId: string,
+  requesterId: string,
+  input: {
+    userId: string;
+    role: "ADMIN" | "DEVELOPER" | "VIEWER";
+  },
+) {
+  const requesterMembership = await requireWorkspaceRole(
+    workspaceId,
+    requesterId,
+    ["OWNER", "ADMIN"],
+  );
+
+  if (
+    requesterMembership.role === "ADMIN" &&
+    input.role === "ADMIN"
+  ) {
+    throw new WorkspaceServiceError(
+      "FORBIDDEN",
+      "Only the workspace owner can add administrators.",
+      403,
+    );
+  }
+
+  const targetUser = await workspaceRepository.findUserById(input.userId);
+
+  if (!targetUser) {
+    throw new WorkspaceServiceError(
+      "USER_NOT_FOUND",
+      "The specified user does not exist.",
+      404,
+    );
+  }
+
+  const existingMembership = await workspaceRepository.findMembership(
+    workspaceId,
+    input.userId,
+  );
+
+  if (existingMembership) {
+    throw new WorkspaceServiceError(
+      "ALREADY_A_MEMBER",
+      "This user is already a member of the workspace.",
+      409,
+    );
+  }
+
+  return workspaceRepository.addMember(
+    workspaceId,
+    input.userId,
+    input.role,
+  );
+},
+
 };
