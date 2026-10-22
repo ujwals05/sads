@@ -13,4 +13,6 @@ workspaceRouter.get("/:workspaceId", workspaceController.get);
 workspaceRouter.patch("/:workspaceId", workspaceController.update);
 workspaceRouter.delete("/:workspaceId", workspaceController.delete);
 
-workspaceRouter.post("/:workspaceId/members",workspaceController.addMember);
+workspaceRouter.post("/:workspaceId/members", workspaceController.addMember);
+workspaceRouter.delete("/:workspaceId/members/:userId", workspaceController.removeMember);
+workspaceRouter.patch("/:workspaceId/members/:userId", workspaceController.updateMemberRole);

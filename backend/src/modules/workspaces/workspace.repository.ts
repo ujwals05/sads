@@ -48,6 +48,12 @@ export const workspaceRepository = {
             userId: true,
             role: true,
             joinedAt: true,
+            user: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
           },
         },
       },
@@ -103,16 +109,47 @@ export const workspaceRepository = {
       },
     });
   },
+
+  removeMember(workspaceId: string, userId: string) {
+    return prisma.workspaceMember.delete({
+      where: {
+        workspaceId_userId: { workspaceId, userId },
+      },
+    });
+  },
+
+  updateMemberRole(
+    workspaceId: string,
+    userId: string,
+    role: "ADMIN" | "DEVELOPER" | "VIEWER",
+  ) {
+    return prisma.workspaceMember.update({
+      where: {
+        workspaceId_userId: { workspaceId, userId },
+      },
+      data: { role },
+      select: {
+        workspaceId: true,
+        userId: true,
+        role: true,
+        joinedAt: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
+    });
+  },
   
   findUserById(userId: string) {
-  return prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      email: true,
-    },
-  });
-},
-
-
+    return prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+      },
+    });
+  },
 };

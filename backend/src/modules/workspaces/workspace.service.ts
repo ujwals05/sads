@@ -151,4 +151,132 @@ async addMember(
   );
 },
 
+async removeMember(
+  workspaceId: string,
+  requesterId: string,
+  targetUserId: string,
+) {
+  const requesterMembership = await requireWorkspaceRole(
+    workspaceId,
+    requesterId,
+    ["OWNER", "ADMIN", "DEVELOPER", "VIEWER"],
+  );
+
+  const targetMembership = await workspaceRepository.findMembership(
+    workspaceId,
+    targetUserId,
+  );
+
+  if (!targetMembership) {
+    throw new WorkspaceServiceError(
+      "MEMBER_NOT_FOUND",
+      "The specified user is not a member of this workspace.",
+      404,
+    );
+  }
+
+  // 1. Self removal (leaving the workspace)
+  if (requesterId === targetUserId) {
+    if (targetMembership.role === "OWNER") {
+      throw new WorkspaceServiceError(
+        "FORBIDDEN",
+        "The workspace owner cannot leave the workspace.",
+        400,
+      );
+    }
+    return workspaceRepository.removeMember(workspaceId, targetUserId);
+  }
+
+  // 2. Removal by another user
+  if (
+    requesterMembership.role !== "OWNER" &&
+    requesterMembership.role !== "ADMIN"
+  ) {
+    throw new WorkspaceServiceError(
+      "FORBIDDEN",
+      "You do not have permission to remove members from this workspace.",
+      403,
+    );
+  }
+
+  if (targetMembership.role === "OWNER") {
+    throw new WorkspaceServiceError(
+      "FORBIDDEN",
+      "The workspace owner cannot be removed.",
+      403,
+    );
+  }
+
+  if (
+    requesterMembership.role === "ADMIN" &&
+    targetMembership.role === "ADMIN"
+  ) {
+    throw new WorkspaceServiceError(
+      "FORBIDDEN",
+      "Only the workspace owner can remove administrators.",
+      403,
+    );
+  }
+
+  return workspaceRepository.removeMember(workspaceId, targetUserId);
+},
+
+async updateMemberRole(
+  workspaceId: string,
+  requesterId: string,
+  targetUserId: string,
+  newRole: "ADMIN" | "DEVELOPER" | "VIEWER",
+) {
+  const requesterMembership = await requireWorkspaceRole(
+    workspaceId,
+    requesterId,
+    ["OWNER", "ADMIN"],
+  );
+
+  const targetMembership = await workspaceRepository.findMembership(
+    workspaceId,
+    targetUserId,
+  );
+
+  if (!targetMembership) {
+    throw new WorkspaceServiceError(
+      "MEMBER_NOT_FOUND",
+      "The specified user is not a member of this workspace.",
+      404,
+    );
+  }
+
+  if (targetMembership.role === "OWNER") {
+    throw new WorkspaceServiceError(
+      "FORBIDDEN",
+      "The workspace owner's role cannot be modified.",
+      403,
+    );
+  }
+
+  if (requesterMembership.role === "ADMIN") {
+    if (targetMembership.role === "ADMIN") {
+      throw new WorkspaceServiceError(
+        "FORBIDDEN",
+        "Only the workspace owner can modify administrator roles.",
+        403,
+      );
+    }
+    if (newRole === "ADMIN") {
+      throw new WorkspaceServiceError(
+        "FORBIDDEN",
+        "Only the workspace owner can assign the administrator role.",
+        403,
+      );
+    }
+  }
+
+  return workspaceRepository.updateMemberRole(
+    workspaceId,
+    targetUserId,
+    newRole,
+  );
+},
+
 };
+

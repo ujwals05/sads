@@ -49,3 +49,21 @@ export const addWorkspaceMemberSchema = z.object({
   userId: z.string().uuid(),
   role: z.enum(["ADMIN", "DEVELOPER", "VIEWER"]),
 });
+
+export const workspaceMemberParamsSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  userId: z.string().uuid(),
+});
+
+export const updateWorkspaceMemberRoleSchema = z.object({
+  role: z.enum(["ADMIN", "DEVELOPER", "VIEWER"]),
+});
+
+export type AddWorkspaceMemberInput = z.infer<
+  typeof addWorkspaceMemberSchema
+>;
+
+export type UpdateWorkspaceMemberRoleInput = z.infer<
+  typeof updateWorkspaceMemberRoleSchema
+>;
+

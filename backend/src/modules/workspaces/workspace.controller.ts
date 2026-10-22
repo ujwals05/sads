@@ -6,6 +6,8 @@ import {
   updateWorkspaceSchema,
   workspaceParamsSchema,
   addWorkspaceMemberSchema,
+  workspaceMemberParamsSchema,
+  updateWorkspaceMemberRoleSchema,
 } from "./workspace.validation.js";
 import {
   WorkspaceServiceError,
@@ -215,6 +217,71 @@ export const workspaceController = {
     );
 
     return res.status(201).json({ data: member });
+  } catch (error) {
+    return handleError(error, res);
+  }
+},
+
+async removeMember(req: Request, res: Response) {
+  const userId = getUserId(req);
+  const params = workspaceMemberParamsSchema.safeParse(req.params);
+
+  if (!userId) {
+    return res.status(401).json({
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Authentication required.",
+      },
+    });
+  }
+
+  if (!params.success) {
+    return sendValidationError(res, "Invalid workspace or member ID.");
+  }
+
+  try {
+    await workspaceService.removeMember(
+      params.data.workspaceId,
+      userId,
+      params.data.userId,
+    );
+
+    return res.status(204).send();
+  } catch (error) {
+    return handleError(error, res);
+  }
+},
+
+async updateMemberRole(req: Request, res: Response) {
+  const userId = getUserId(req);
+  const params = workspaceMemberParamsSchema.safeParse(req.params);
+  const body = updateWorkspaceMemberRoleSchema.safeParse(req.body);
+
+  if (!userId) {
+    return res.status(401).json({
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Authentication required.",
+      },
+    });
+  }
+
+  if (!params.success || !body.success) {
+    return sendValidationError(
+      res,
+      "Invalid workspace, member, or role data.",
+    );
+  }
+
+  try {
+    const updated = await workspaceService.updateMemberRole(
+      params.data.workspaceId,
+      userId,
+      params.data.userId,
+      body.data.role,
+    );
+
+    return res.status(200).json({ data: updated });
   } catch (error) {
     return handleError(error, res);
   }
