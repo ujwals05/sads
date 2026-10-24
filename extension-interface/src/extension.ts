@@ -5,7 +5,11 @@ import { SadsViewProvider } from './SadsViewProvider';
 export function activate(
   context: vscode.ExtensionContext,
 ): void {
-  const provider = new SadsViewProvider(context.extensionUri);
+  
+  const provider = new SadsViewProvider(
+  context.extensionUri,
+  context,
+);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
