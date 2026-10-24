@@ -16,6 +16,16 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "SADS Agent",
+      "properties": {
+        "sads.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:5000",
+          "description": "Base URL of the SADS backend API."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
