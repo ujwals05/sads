@@ -4,6 +4,7 @@ import { MessageSquare, Plus } from 'lucide-react';
 export interface ChatSession {
   id: string;
   title: string;
+  workspaceId?: string;
 }
 
 interface SessionListProps {

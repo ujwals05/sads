@@ -9,6 +9,7 @@ function createId() {
 }
 export default function App() {
     const initialId = useRef(createId());
+    const [backendStatus, setBackendStatus] = useState("Not tested");
     const [sessions, setSessions] = useState([
         { id: initialId.current, title: 'New conversation' },
     ]);
@@ -17,6 +18,13 @@ export default function App() {
     const [busy, setBusy] = useState(false);
     const pending = useRef(null);
     const messages = messagesBySession[activeSessionId] ?? [];
+    function testBackendConnection() {
+        setBackendStatus("Checking backend...");
+        vscode.postMessage({
+            type: "backend.health",
+            requestId: createId(),
+        });
+    }
     function addMessage(sessionId, message) {
         setMessagesBySession((current) => ({
             ...current,
@@ -79,6 +87,12 @@ export default function App() {
     useEffect(() => {
         function handleMessage(event) {
             const message = event.data;
+            if (message.type === "backend.health.result") {
+                setBackendStatus(message.ok
+                    ? `Connected (HTTP ${message.status})`
+                    : `Connection failed: ${message.text ?? "Unknown error"}`);
+                return;
+            }
             if (message.type !== 'assistant.reply' &&
                 message.type !== 'task.cancelled' &&
                 message.type !== 'task.error') {
@@ -112,20 +126,29 @@ export default function App() {
         };
     }, []);
     return (<div className="sads-app">
-      <ChatHeader onNewChat={newChat}/>
+    <ChatHeader onNewChat={newChat}/>
 
-      <div className="workspace">
-        <SessionList sessions={sessions} activeSessionId={activeSessionId} onSelect={(id) => {
+    {/* Backend connection test */}
+    <div className="backend-connection">
+      <button type="button" onClick={testBackendConnection}>
+        Test Backend Connection
+      </button>
+
+      <span role="status">{backendStatus}</span>
+    </div>
+
+    <div className="workspace">
+      <SessionList sessions={sessions} activeSessionId={activeSessionId} onSelect={(id) => {
             if (pending.current)
                 return;
             setActiveSessionId(id);
         }} onNewChat={newChat}/>
 
-        <div className="chat-panel">
-          <MessageList messages={messages} busy={busy}/>
-          <PromptComposer busy={busy} onSend={sendPrompt} onCancel={cancelRequest}/>
-        </div>
+      <div className="chat-panel">
+        <MessageList messages={messages} busy={busy}/>
+        <PromptComposer busy={busy} onSend={sendPrompt} onCancel={cancelRequest}/>
       </div>
-    </div>);
+    </div>
+  </div>);
 }
 //# sourceMappingURL=App.js.map
