@@ -1,15 +1,29 @@
 
 import * as vscode from 'vscode';
 import { SadsViewProvider } from './SadsViewProvider';
+import { ProposedContentProvider } from './agent/workspaceTools';
 
 export function activate(
   context: vscode.ExtensionContext,
 ): void {
   
+  const output = vscode.window.createOutputChannel('SADS Agent');
+  const proposals = new ProposedContentProvider();
+
+  context.subscriptions.push(
+    output,
+    vscode.workspace.registerTextDocumentContentProvider(
+      ProposedContentProvider.scheme,
+      proposals,
+    ),
+  );
+
   const provider = new SadsViewProvider(
-  context.extensionUri,
-  context,
-);
+    context.extensionUri,
+    context,
+    proposals,
+    output,
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

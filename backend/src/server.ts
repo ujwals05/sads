@@ -16,6 +16,10 @@ async function startServer(): Promise<void> {
     );
   });
 
+  // An agent step waits on a model call that can run for several minutes.
+  server.requestTimeout = 15 * 60_000;
+  server.headersTimeout = 60_000;
+
   let shuttingDown = false;
 
   async function shutdown(): Promise<void> {

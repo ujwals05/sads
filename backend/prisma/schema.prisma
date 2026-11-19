@@ -122,8 +122,15 @@ model Message {
   id              String      @id @default(uuid()) @db.Uuid
   conversationId  String      @db.Uuid
   senderId        String?     @db.Uuid
+  // Monotonic insertion order. createdAt can tie within the same millisecond,
+  // and the agent transcript must be replayed in exact order.
+  sequence        Int         @default(autoincrement())
   role            MessageRole
+  // Human-readable text used for display and search.
   content         String      @db.Text
+  // Raw Claude API content blocks (text, thinking, tool_use, tool_result, ...).
+  // Replayed unchanged when rebuilding the model transcript.
+  blocks          Json?
   clientRequestId String?
   createdAt       DateTime    @default(now())
 
@@ -132,6 +139,7 @@ model Message {
   task         Task?
 
   @@unique([conversationId, clientRequestId])
+  @@index([conversationId, sequence])
   @@index([conversationId, createdAt])
   @@index([senderId, createdAt])
 }

@@ -11,7 +11,14 @@ export function createApp() {
 
   app.disable("x-powered-by");
   app.use(helmet());
-  app.use(express.json({ limit: "1mb" }));
+  // Larger bodies are allowed only on the agent tool-results route.
+  app.use((req, res, next) => {
+    if (/^\/api\/v1\/tasks\/[^/]+\/tool-results$/.test(req.path)) {
+      next();
+      return;
+    }
+    express.json({ limit: "1mb" })(req, res, next);
+  });
 
   app.use(
     rateLimit({

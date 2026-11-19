@@ -6,6 +6,8 @@ import { ApiClient, ApiClientError } from './backend/apiClient';
 import { AuthService } from './backend/authService';
 import type { ApiEnvelope, AuthUser } from './backend/authTypes';
 import { TokenStorage } from './backend/tokenStorage';
+import { AgentRun, AgentRunner } from './agent/agentRunner';
+import type { ProposedContentProvider } from './agent/workspaceTools';
 import type {
   Workspace,
   WorkspaceDetails,
@@ -16,9 +18,36 @@ import type {
 interface PromptMessage {
   type: 'chat.prompt';
   requestId: string;
+  /** Webview session ID (a draft ID until the conversation is created). */
   sessionId: string;
+  workspaceId: string;
+  /** Backend conversation ID, or null to start a new conversation. */
+  conversationId: string | null;
   text: string;
 }
+
+interface ConversationListMessage {
+  type: 'conversation.list';
+  requestId: string;
+  workspaceId: string;
+}
+
+interface ConversationGetMessage {
+  type: 'conversation.get';
+  requestId: string;
+  conversationId: string;
+}
+
+interface ConversationDeleteMessage {
+  type: 'conversation.delete';
+  requestId: string;
+  conversationId: string;
+}
+
+type ConversationMessage =
+  | ConversationListMessage
+  | ConversationGetMessage
+  | ConversationDeleteMessage;
 
 interface CancelMessage {
   type: 'task.cancel';
@@ -148,6 +177,7 @@ type WorkspaceMessage =
 
 type WebviewMessage =
   | PromptMessage
+  | ConversationMessage
   | CancelMessage
   | BackendHealthMessage
   | AuthMessage
@@ -159,10 +189,15 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
 
   private readonly apiClient: ApiClient;
   private readonly authService: AuthService;
+  private readonly agentRunner: AgentRunner;
+  /** Agent runs in progress, keyed by the webview's request ID. */
+  private readonly runs = new Map<string, AgentRun>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     context: vscode.ExtensionContext,
+    proposals: ProposedContentProvider,
+    output: vscode.OutputChannel,
   ) {
     this.apiClient = new ApiClient(() =>
       vscode.workspace
@@ -173,6 +208,13 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
     this.authService = new AuthService(
       this.apiClient,
       new TokenStorage(context.secrets),
+    );
+
+    this.agentRunner = new AgentRunner(
+      this.apiClient,
+      this.authService,
+      proposals,
+      output,
     );
   }
 
@@ -193,7 +235,8 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.onDidDispose(() => {
-      // No persistent resources are created in this starter.
+      for (const run of this.runs.values()) {run.cancel();}
+      this.runs.clear();
     });
 
     void this.loadHtml(webview).then(
@@ -214,8 +257,6 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
         `;
       },
     );
-
-    const cancelled = new Set<string>();
 
     webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
@@ -299,50 +340,130 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
-        // 3. Cancel a chat task
+        // 5. Conversation history
+        if (
+          message.type === 'conversation.list' ||
+          message.type === 'conversation.get' ||
+          message.type === 'conversation.delete'
+        ) {
+          await this.handleConversationMessage(webview, message);
+          return;
+        }
+
+        // 6. Cancel a running agent task
         if (
           message.type === 'task.cancel' &&
           typeof message.requestId === 'string'
         ) {
-          cancelled.add(message.requestId);
-
-          await webview.postMessage({
-            type: 'task.cancelled',
-            requestId: message.requestId,
-          });
-
+          this.runs.get(message.requestId)?.cancel();
           return;
         }
 
-        // 4. Handle chat prompts
+        // 7. Prompts for the coding agent
         if (
-          message.type !== 'chat.prompt' ||
-          typeof message.text !== 'string' ||
-          typeof message.requestId !== 'string' ||
-          typeof message.sessionId !== 'string'
+          message.type === 'chat.prompt' &&
+          typeof message.text === 'string' &&
+          typeof message.requestId === 'string' &&
+          typeof message.workspaceId === 'string'
         ) {
-          return;
+          await this.handlePrompt(webview, message);
         }
-
-        const { requestId, text } = message;
-
-        // Mock response for now. The AI agent will be integrated later.
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        if (cancelled.delete(requestId)) {
-          return;
-        }
-
-        await webview.postMessage({
-          type: 'assistant.reply',
-          requestId,
-          text:
-            `I received your request:\n\n"${text}"\n\n` +
-            'The React chat UI is connected to the SADS extension host. ' +
-            'The backend and AI agent will be integrated in a later phase.',
-        });
       },
     );
+  }
+
+  private async handlePrompt(
+    webview: vscode.Webview,
+    message: PromptMessage,
+  ): Promise<void> {
+    const { requestId, sessionId } = message;
+    const run = new AgentRun();
+    this.runs.set(requestId, run);
+
+    try {
+      const outcome = await this.agentRunner.run(run, {
+        workspaceId: message.workspaceId,
+        conversationId: message.conversationId,
+        text: message.text,
+        clientRequestId: requestId,
+        callbacks: {
+          onConversationCreated: (conversation) => {
+            void webview.postMessage({
+              type: 'agent.conversation',
+              requestId,
+              sessionId,
+              conversation,
+            });
+          },
+          onMessages: (messages) => {
+            void webview.postMessage({ type: 'agent.messages', requestId, messages });
+          },
+          onActivity: (text) => {
+            void webview.postMessage({ type: 'agent.activity', requestId, text });
+          },
+        },
+      });
+
+      await webview.postMessage({
+        type: 'agent.done',
+        requestId,
+        status: outcome.status,
+        conversationId: outcome.conversationId,
+        error: outcome.error,
+      });
+    } finally {
+      this.runs.delete(requestId);
+    }
+  }
+
+  private async handleConversationMessage(
+    webview: vscode.Webview,
+    message: ConversationMessage,
+  ): Promise<void> {
+    try {
+      let data: unknown = null;
+
+      switch (message.type) {
+        case 'conversation.list':
+          data = await this.agentRunner.listConversations(message.workspaceId);
+          break;
+        case 'conversation.get':
+          data = await this.agentRunner.getConversation(message.conversationId);
+          break;
+        case 'conversation.delete':
+          await this.agentRunner.deleteConversation(message.conversationId);
+          data = { conversationId: message.conversationId };
+          break;
+      }
+
+      await webview.postMessage({
+        type: 'conversation.result',
+        operation: message.type,
+        requestId: message.requestId,
+        ok: true,
+        data,
+        ...(message.type === 'conversation.list'
+          ? { workspaceId: message.workspaceId }
+          : { conversationId: message.conversationId }),
+      });
+    } catch (error: unknown) {
+      const isApiError = error instanceof ApiClientError;
+
+      await webview.postMessage({
+        type: 'conversation.result',
+        operation: message.type,
+        requestId: message.requestId,
+        ok: false,
+        error: {
+          code: isApiError ? error.code : 'CONVERSATION_ERROR',
+          status: isApiError ? error.status : 0,
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Conversation request failed.',
+        },
+      });
+    }
   }
 
   private async handleAuthMessage(

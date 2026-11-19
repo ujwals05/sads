@@ -23,6 +23,11 @@
           "type": "string",
           "default": "http://localhost:5000",
           "description": "Base URL of the SADS backend API."
+        },
+        "sads.agent.autoApproveFileEdits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apply the AI agent's file edits without asking for approval. Dependency manifests and commands always ask."
         }
       }
     },

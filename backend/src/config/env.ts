@@ -26,6 +26,17 @@ const envSchema = z.object({
   JWT_REFRESH_EXPIRES: z.custom<StringValue>(
     (val) => typeof val === "string"
   ),
+
+  // AI coding agent. ANTHROPIC_API_KEY is read by the Anthropic SDK itself;
+  // it is optional here so the rest of the API can run without it.
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  AGENT_MODEL: z.string().min(1).default("claude-opus-5-5"),
+  AGENT_EFFORT: z
+    .enum(["low", "medium", "high", "xhigh", "max"])
+    .default("high"),
+  AGENT_MAX_TOKENS: z.coerce.number().int().min(1024).max(128000).default(64000),
+  // Upper bound on model calls in a single task, to stop runaway loops.
+  AGENT_MAX_STEPS: z.coerce.number().int().min(1).max(500).default(50),
 });
 
 export const env = envSchema.parse(process.env);

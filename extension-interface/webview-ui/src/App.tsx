@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import ChatHeader from './components/ChatHeader.tsx';
 import MessageList, {
   type ChatMessage,
+  type ChatToolCall,
+  type ChatToolResult,
 } from './components/MessageList.tsx';
 import PromptComposer from './components/PromptComposer.tsx';
 import SessionList, {
@@ -19,19 +21,41 @@ import type {
 } from './types/workspace.ts';
 import { ShieldCheck } from 'lucide-react';
 
+/** Message shape returned by the backend for chat history and agent steps. */
+interface DisplayMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'tool';
+  text: string;
+  toolCalls?: ChatToolCall[];
+  toolResults?: ChatToolResult[];
+}
+
+interface ConversationSummary {
+  id: string;
+  workspaceId: string;
+  title: string | null;
+}
+
 interface HostMessage {
   type:
-    | 'assistant.reply'
-    | 'task.cancelled'
-    | 'task.error'
+    | 'agent.conversation'
+    | 'agent.messages'
+    | 'agent.activity'
+    | 'agent.done'
+    | 'conversation.result'
     | 'backend.health.result'
     | 'auth.result'
     | 'workspace.result'
     | 'user.search.result';
   text?: string;
   requestId?: string;
+  sessionId?: string;
+  workspaceId?: string;
+  conversationId?: string | null;
+  conversation?: ConversationSummary;
+  messages?: DisplayMessage[];
   ok?: boolean;
-  status?: number;
+  status?: number | string;
   operation?: string;
   user?: AuthUser | null;
   data?: any;
@@ -46,6 +70,27 @@ interface HostMessage {
 interface PendingRequest {
   sessionId: string;
   requestId: string;
+}
+
+const DRAFT_PREFIX = 'draft-';
+const isDraft = (sessionId: string) => sessionId.startsWith(DRAFT_PREFIX);
+
+function toChatMessage(message: DisplayMessage): ChatMessage {
+  return {
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    toolCalls: message.toolCalls,
+    toolResults: message.toolResults,
+  };
+}
+
+function toSession(conversation: ConversationSummary): ChatSession {
+  return {
+    id: conversation.id,
+    title: conversation.title || 'Untitled conversation',
+    workspaceId: conversation.workspaceId,
+  };
 }
 
 const vscode =
@@ -64,7 +109,6 @@ function createId(): string {
 }
 
 export default function App() {
-  const [initialSessionId] = useState(() => createId());
 
   // Authentication State
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -91,27 +135,29 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<UserSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
 
-  // Chat State
-  const [sessions, setSessions] = useState<ChatSession[]>([
-    { id: initialSessionId, title: 'New conversation' },
-  ]);
-  const [activeSessionId, setActiveSessionId] = useState(initialSessionId);
+  // Chat State: sessions are backend conversations of the active workspace,
+  // plus local drafts that become conversations on their first message.
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [messagesBySession, setMessagesBySession] = useState<
     Record<string, ChatMessage[]>
   >({});
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Session whose agent task is running (re-keyed when a draft is saved). */
+  const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [activity, setActivity] = useState('');
   const pending = useRef<PendingRequest | null>(null);
 
   // Determine current user's role in active workspace
   const activeRole: WorkspaceRole | undefined =
     activeWorkspaceDetails?.members.find((m) => m.userId === user?.id)?.role;
 
-  // Filter conversations for the active workspace
+  const canUseAgent = activeRole !== undefined && activeRole !== 'VIEWER';
+
+  // Conversations belonging to the active workspace
   const currentWorkspaceSessions = sessions.filter(
-    (s) =>
-      !s.workspaceId ||
-      !activeWorkspaceId ||
-      s.workspaceId === activeWorkspaceId,
+    (s) => s.workspaceId === activeWorkspaceId,
   );
 
   const messages = messagesBySession[activeSessionId] ?? [];
@@ -133,17 +179,16 @@ export default function App() {
   }
 
   function newChat() {
-    if (pending.current) {
-      vscode.postMessage({
-        type: 'task.cancel',
-        requestId: pending.current.requestId,
-      });
-      pending.current = null;
+    // A running task keeps going in its own conversation; do not interrupt it.
+    if (pending.current) return;
+
+    const existingDraft = currentWorkspaceSessions.find((s) => isDraft(s.id));
+    if (existingDraft) {
+      setActiveSessionId(existingDraft.id);
+      return;
     }
 
-    setBusy(false);
-
-    const id = createId();
+    const id = `${DRAFT_PREFIX}${createId()}`;
     setSessions((current) => [
       {
         id,
@@ -155,8 +200,30 @@ export default function App() {
     setActiveSessionId(id);
   }
 
+  function loadConversations(workspaceId: string) {
+    vscode.postMessage({
+      type: 'conversation.list',
+      requestId: createId(),
+      workspaceId,
+    });
+  }
+
+  function selectSession(sessionId: string) {
+    if (pending.current) return;
+    setActiveSessionId(sessionId);
+
+    if (!isDraft(sessionId) && !messagesBySession[sessionId]) {
+      setLoadingSessionId(sessionId);
+      vscode.postMessage({
+        type: 'conversation.get',
+        requestId: createId(),
+        conversationId: sessionId,
+      });
+    }
+  }
+
   function sendPrompt(text: string) {
-    if (busy) return;
+    if (busy || !activeWorkspaceId || !activeSessionId || !canUseAgent) return;
 
     const requestId = createId();
     const sessionId = activeSessionId;
@@ -180,11 +247,15 @@ export default function App() {
 
     pending.current = { sessionId, requestId };
     setBusy(true);
+    setBusySessionId(sessionId);
+    setActivity('');
 
     vscode.postMessage({
       type: 'chat.prompt',
       requestId,
       sessionId,
+      workspaceId: activeWorkspaceId,
+      conversationId: isDraft(sessionId) ? null : sessionId,
       text,
     });
   }
@@ -250,6 +321,9 @@ export default function App() {
     setWorkspaces([]);
     setActiveWorkspaceId(null);
     setActiveWorkspaceDetails(null);
+    setSessions([]);
+    setMessagesBySession({});
+    setActiveSessionId('');
   }
 
   // Workspace Messaging Handlers
@@ -393,14 +467,28 @@ export default function App() {
     }
   }, [user]);
 
-  // Load details when activeWorkspaceId changes
+  // Load details and conversations when activeWorkspaceId changes
   useEffect(() => {
     if (activeWorkspaceId) {
       loadWorkspaceDetails(activeWorkspaceId);
+      loadConversations(activeWorkspaceId);
     } else {
       setActiveWorkspaceDetails(null);
     }
   }, [activeWorkspaceId]);
+
+  // Keep a valid session selected for the active workspace.
+  useEffect(() => {
+    if (!activeWorkspaceId || pending.current) return;
+    if (currentWorkspaceSessions.some((s) => s.id === activeSessionId)) return;
+
+    const first = currentWorkspaceSessions[0];
+    if (first) {
+      selectSession(first.id);
+    } else {
+      newChat();
+    }
+  }, [activeWorkspaceId, sessions]);
 
   // Handle incoming messages from VS Code extension host
   useEffect(() => {
@@ -579,11 +667,61 @@ export default function App() {
         return;
       }
 
-      // 5. Chat tasks
+      // 5. Conversation history
+      if (message.type === 'conversation.result') {
+        if (message.operation === 'conversation.list') {
+          if (!message.ok) {
+            setWorkspaceError(message.error?.message || 'Failed to load conversations.');
+            return;
+          }
+          const listedWorkspaceId = message.workspaceId;
+          const loaded = (Array.isArray(message.data) ? message.data : []).map(
+            (c: ConversationSummary) => toSession(c),
+          );
+          setSessions((current) => [
+            // Keep drafts and other workspaces' sessions; replace this workspace's list.
+            ...current.filter(
+              (s) => isDraft(s.id) || s.workspaceId !== listedWorkspaceId,
+            ),
+            ...loaded,
+          ]);
+          return;
+        }
+
+        if (message.operation === 'conversation.get') {
+          const conversationId = message.conversationId ?? '';
+          setLoadingSessionId((current) =>
+            current === conversationId ? null : current,
+          );
+          if (!message.ok) {
+            setMessagesBySession((current) => ({
+              ...current,
+              [conversationId]: [
+                {
+                  id: createId(),
+                  role: 'error',
+                  text: message.error?.message || 'Failed to load this conversation.',
+                },
+              ],
+            }));
+            return;
+          }
+          const history: DisplayMessage[] = message.data?.messages ?? [];
+          setMessagesBySession((current) => ({
+            ...current,
+            [conversationId]: history.map(toChatMessage),
+          }));
+          return;
+        }
+        return;
+      }
+
+      // 6. Agent task events
       if (
-        message.type !== 'assistant.reply' &&
-        message.type !== 'task.cancelled' &&
-        message.type !== 'task.error'
+        message.type !== 'agent.conversation' &&
+        message.type !== 'agent.messages' &&
+        message.type !== 'agent.activity' &&
+        message.type !== 'agent.done'
       ) {
         return;
       }
@@ -593,22 +731,63 @@ export default function App() {
       }
 
       const sessionId = pending.current.sessionId;
+
+      if (message.type === 'agent.conversation' && message.conversation) {
+        // The draft became a real conversation: re-key it everywhere.
+        const conversation = message.conversation;
+        pending.current = { ...pending.current, sessionId: conversation.id };
+        setBusySessionId(conversation.id);
+        setSessions((current) => [
+          toSession(conversation),
+          ...current.filter((s) => s.id !== sessionId && s.id !== conversation.id),
+        ]);
+        setMessagesBySession((current) => {
+          const { [sessionId]: draftMessages, ...rest } = current;
+          return { ...rest, [conversation.id]: draftMessages ?? [] };
+        });
+        setActiveSessionId((current) => (current === sessionId ? conversation.id : current));
+        return;
+      }
+
+      if (message.type === 'agent.activity') {
+        setActivity(message.text ?? '');
+        return;
+      }
+
+      if (message.type === 'agent.messages') {
+        const incoming = (message.messages ?? []).map(toChatMessage);
+        setMessagesBySession((current) => {
+          const existing = current[sessionId] ?? [];
+          const seen = new Set(existing.map((m) => m.id));
+          return {
+            ...current,
+            [sessionId]: [...existing, ...incoming.filter((m) => !seen.has(m.id))],
+          };
+        });
+        return;
+      }
+
+      // agent.done
       pending.current = null;
       setBusy(false);
+      setBusySessionId(null);
+      setActivity('');
 
-      if (message.type === 'assistant.reply') {
+      if (message.status === 'FAILED' && message.error) {
         addMessage(sessionId, {
           id: createId(),
-          role: 'assistant',
-          text: message.text ?? 'No response was returned.',
+          role: 'error',
+          text: message.error.message || 'The agent failed.',
         });
-      } else if (message.type === 'task.error') {
+      } else if (message.status === 'CANCELLED') {
         addMessage(sessionId, {
           id: createId(),
-          role: 'assistant',
-          text: `Something went wrong: ${message.text ?? 'Unknown error'}`,
+          role: 'error',
+          text: 'Stopped. Any changes you already approved were kept.',
         });
       }
+
+      if (activeWorkspaceId) loadConversations(activeWorkspaceId);
     }
 
     window.addEventListener('message', handleMessage);
@@ -696,20 +875,34 @@ export default function App() {
         <SessionList
           sessions={currentWorkspaceSessions}
           activeSessionId={activeSessionId}
-          onSelect={(id) => {
-            if (pending.current) return;
-            setActiveSessionId(id);
-          }}
+          onSelect={selectSession}
           onNewChat={newChat}
         />
 
         <div className="chat-panel">
-          <MessageList messages={messages} busy={busy} />
-          <PromptComposer
-            busy={busy}
-            onSend={sendPrompt}
-            onCancel={cancelRequest}
+          <MessageList
+            messages={messages}
+            busy={busy && busySessionId === activeSessionId}
+            activity={activity}
+            loading={loadingSessionId === activeSessionId}
+            onQuickPrompt={canUseAgent && !busy ? sendPrompt : undefined}
           />
+          {!activeWorkspaceId ? (
+            <p className="composer-readonly">
+              Create or select a workspace to start working with the agent.
+            </p>
+          ) : activeRole === 'VIEWER' ? (
+            <p className="composer-readonly">
+              You have read-only access to this workspace. Ask an admin for the
+              Developer role to use the agent.
+            </p>
+          ) : (
+            <PromptComposer
+              busy={busy}
+              onSend={sendPrompt}
+              onCancel={cancelRequest}
+            />
+          )}
         </div>
       </div>
 
