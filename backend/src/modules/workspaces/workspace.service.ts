@@ -1,53 +1,80 @@
-
+import { Prisma } from "../../generated/prisma/client.js";
+import { ServiceError } from "../../utils/http.js";
 import { workspaceRepository } from "./workspace.repository.js";
+import {
+  assignableRolesFor,
+  canDeleteWorkspace,
+  canUpdateWorkspace,
+  checkAddMember,
+  checkChangeRole,
+  checkRemoveMember,
+  checkTransferOwnership,
+  type AssignableRole,
+  type PermissionDecision,
+  type WorkspaceRoleName,
+} from "./workspace.permissions.js";
 import type {
+  AddWorkspaceMemberInput,
   CreateWorkspaceInput,
   UpdateWorkspaceInput,
 } from "./workspace.validation.js";
 
-export class WorkspaceServiceError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly statusCode: number,
-  ) {
-    super(message);
+export class WorkspaceServiceError extends ServiceError {
+  constructor(code: string, message: string, statusCode: number) {
+    super(code, message, statusCode);
     this.name = "WorkspaceServiceError";
   }
 }
 
-const requireWorkspaceRole = async (
-  workspaceId: string,
-  userId: string,
-  allowedRoles: string[],
-) => {
+// Non-members always get 404 (never 403) so workspace IDs cannot be probed.
+const workspaceNotFound = () =>
+  new WorkspaceServiceError("WORKSPACE_NOT_FOUND", "Workspace not found.", 404);
+
+const memberNotFound = () =>
+  new WorkspaceServiceError(
+    "MEMBER_NOT_FOUND",
+    "The specified user is not a member of this workspace.",
+    404,
+  );
+
+const forbidden = (message: string) =>
+  new WorkspaceServiceError("FORBIDDEN", message, 403);
+
+function enforce(decision: PermissionDecision): void {
+  if (!decision.allowed) throw forbidden(decision.reason);
+}
+
+function isPrismaError(error: unknown, code: string): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === code
+  );
+}
+
+/**
+ * Verify that `userId` is a member of `workspaceId` and return the
+ * membership. This is the gate every workspace-scoped operation (including
+ * conversations) goes through; the workspace ID from the client is never
+ * trusted on its own.
+ */
+export async function requireMembership(workspaceId: string, userId: string) {
   const membership = await workspaceRepository.findMembership(
     workspaceId,
     userId,
   );
-
-  if (!membership) {
-    throw new WorkspaceServiceError(
-      "WORKSPACE_NOT_FOUND",
-      "Workspace not found.",
-      404,
-    );
-  }
-
-  if (!allowedRoles.includes(membership.role)) {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "You do not have permission to perform this operation.",
-      403,
-    );
-  }
-
-  return membership;
-};
+  if (!membership) throw workspaceNotFound();
+  return membership as typeof membership & { role: WorkspaceRoleName };
+}
 
 export const workspaceService = {
   create(userId: string, input: CreateWorkspaceInput) {
-    return workspaceRepository.create(userId, input);
+    return workspaceRepository
+      .create(userId, input)
+      .then((workspace) => ({
+        ...workspace,
+        role: "OWNER" as const,
+        memberCount: 1,
+        conversationCount: 0,
+      }));
   },
 
   list(userId: string) {
@@ -55,20 +82,19 @@ export const workspaceService = {
   },
 
   async get(workspaceId: string, userId: string) {
-    const workspace = await workspaceRepository.findForUser(
-      workspaceId,
-      userId,
-    );
+    const membership = await requireMembership(workspaceId, userId);
+    const workspace = await workspaceRepository.findById(workspaceId);
+    if (!workspace) throw workspaceNotFound();
 
-    if (!workspace) {
-      throw new WorkspaceServiceError(
-        "WORKSPACE_NOT_FOUND",
-        "Workspace not found.",
-        404,
-      );
-    }
-
-    return workspace;
+    return {
+      ...workspace,
+      role: membership.role,
+      permissions: {
+        canUpdate: canUpdateWorkspace(membership.role),
+        canDelete: canDeleteWorkspace(membership.role),
+        assignableRoles: assignableRolesFor(membership.role),
+      },
+    };
   },
 
   async update(
@@ -76,207 +102,180 @@ export const workspaceService = {
     userId: string,
     input: UpdateWorkspaceInput,
   ) {
-    await requireWorkspaceRole(
-      workspaceId,
-      userId,
-      ["OWNER", "ADMIN"],
-    );
-
+    const membership = await requireMembership(workspaceId, userId);
+    if (!canUpdateWorkspace(membership.role)) {
+      throw forbidden("Only the workspace owner or an admin can update workspace settings.");
+    }
     return workspaceRepository.update(workspaceId, input);
   },
 
   async delete(workspaceId: string, userId: string) {
-    await requireWorkspaceRole(
+    const membership = await requireMembership(workspaceId, userId);
+    if (!canDeleteWorkspace(membership.role)) {
+      throw forbidden("Only the workspace owner can delete the workspace.");
+    }
+    try {
+      await workspaceRepository.delete(workspaceId);
+    } catch (error) {
+      if (isPrismaError(error, "P2025")) throw workspaceNotFound();
+      throw error;
+    }
+  },
+
+  async listMembers(workspaceId: string, userId: string) {
+    await requireMembership(workspaceId, userId);
+    return workspaceRepository.listMembers(workspaceId);
+  },
+
+  async addMember(
+    workspaceId: string,
+    requesterId: string,
+    input: AddWorkspaceMemberInput,
+  ) {
+    const requester = await requireMembership(workspaceId, requesterId);
+    enforce(checkAddMember(requester.role, input.role));
+
+    const targetUser = await workspaceRepository.findUserById(input.userId);
+    if (!targetUser) {
+      throw new WorkspaceServiceError(
+        "USER_NOT_FOUND",
+        "The specified user does not exist.",
+        404,
+      );
+    }
+
+    const alreadyMember = () =>
+      new WorkspaceServiceError(
+        "ALREADY_A_MEMBER",
+        `${targetUser.email} is already a member of this workspace.`,
+        409,
+      );
+
+    const existing = await workspaceRepository.findMembership(
       workspaceId,
-      userId,
-      ["OWNER"],
+      input.userId,
     );
+    if (existing) throw alreadyMember();
 
-    return workspaceRepository.delete(workspaceId);
+    try {
+      return await workspaceRepository.addMember(
+        workspaceId,
+        input.userId,
+        input.role,
+      );
+    } catch (error) {
+      // Concurrent add of the same user: the composite primary key wins.
+      if (isPrismaError(error, "P2002")) throw alreadyMember();
+      throw error;
+    }
   },
 
-  
-async addMember(
-  workspaceId: string,
-  requesterId: string,
-  input: {
-    userId: string;
-    role: "ADMIN" | "DEVELOPER" | "VIEWER";
+  async removeMember(
+    workspaceId: string,
+    requesterId: string,
+    targetUserId: string,
+  ) {
+    const requester = await requireMembership(workspaceId, requesterId);
+    const target = await workspaceRepository.findMembership(
+      workspaceId,
+      targetUserId,
+    );
+    if (!target) throw memberNotFound();
+
+    enforce(
+      checkRemoveMember({
+        actorId: requesterId,
+        actorRole: requester.role,
+        targetId: targetUserId,
+        targetRole: target.role as WorkspaceRoleName,
+      }),
+    );
+
+    try {
+      await workspaceRepository.removeMember(workspaceId, targetUserId);
+    } catch (error) {
+      if (isPrismaError(error, "P2025")) throw memberNotFound();
+      throw error;
+    }
   },
-) {
-  const requesterMembership = await requireWorkspaceRole(
-    workspaceId,
-    requesterId,
-    ["OWNER", "ADMIN"],
-  );
 
-  if (
-    requesterMembership.role === "ADMIN" &&
-    input.role === "ADMIN"
+  async updateMemberRole(
+    workspaceId: string,
+    requesterId: string,
+    targetUserId: string,
+    newRole: AssignableRole,
   ) {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "Only the workspace owner can add administrators.",
-      403,
+    const requester = await requireMembership(workspaceId, requesterId);
+    const target = await workspaceRepository.findMembership(
+      workspaceId,
+      targetUserId,
     );
-  }
+    if (!target) throw memberNotFound();
 
-  const targetUser = await workspaceRepository.findUserById(input.userId);
+    const targetRole = target.role as WorkspaceRoleName;
 
-  if (!targetUser) {
-    throw new WorkspaceServiceError(
-      "USER_NOT_FOUND",
-      "The specified user does not exist.",
-      404,
+    enforce(
+      checkChangeRole({
+        actorId: requesterId,
+        actorRole: requester.role,
+        targetId: targetUserId,
+        targetRole,
+        newRole,
+      }),
     );
-  }
 
-  const existingMembership = await workspaceRepository.findMembership(
-    workspaceId,
-    input.userId,
-  );
-
-  if (existingMembership) {
-    throw new WorkspaceServiceError(
-      "ALREADY_A_MEMBER",
-      "This user is already a member of the workspace.",
-      409,
+    const updated = await workspaceRepository.updateMemberRole(
+      workspaceId,
+      targetUserId,
+      targetRole,
+      newRole,
     );
-  }
 
-  return workspaceRepository.addMember(
-    workspaceId,
-    input.userId,
-    input.role,
-  );
-},
-
-async removeMember(
-  workspaceId: string,
-  requesterId: string,
-  targetUserId: string,
-) {
-  const requesterMembership = await requireWorkspaceRole(
-    workspaceId,
-    requesterId,
-    ["OWNER", "ADMIN", "DEVELOPER", "VIEWER"],
-  );
-
-  const targetMembership = await workspaceRepository.findMembership(
-    workspaceId,
-    targetUserId,
-  );
-
-  if (!targetMembership) {
-    throw new WorkspaceServiceError(
-      "MEMBER_NOT_FOUND",
-      "The specified user is not a member of this workspace.",
-      404,
-    );
-  }
-
-  // 1. Self removal (leaving the workspace)
-  if (requesterId === targetUserId) {
-    if (targetMembership.role === "OWNER") {
+    if (!updated) {
       throw new WorkspaceServiceError(
-        "FORBIDDEN",
-        "The workspace owner cannot leave the workspace.",
-        400,
+        "MEMBERSHIP_CHANGED",
+        "This member was changed by someone else. Refresh and try again.",
+        409,
       );
     }
-    return workspaceRepository.removeMember(workspaceId, targetUserId);
-  }
 
-  // 2. Removal by another user
-  if (
-    requesterMembership.role !== "OWNER" &&
-    requesterMembership.role !== "ADMIN"
+    return updated;
+  },
+
+  async transferOwnership(
+    workspaceId: string,
+    requesterId: string,
+    newOwnerId: string,
   ) {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "You do not have permission to remove members from this workspace.",
-      403,
+    const requester = await requireMembership(workspaceId, requesterId);
+    enforce(
+      checkTransferOwnership({
+        actorId: requesterId,
+        actorRole: requester.role,
+        targetId: newOwnerId,
+      }),
     );
-  }
 
-  if (targetMembership.role === "OWNER") {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "The workspace owner cannot be removed.",
-      403,
+    const target = await workspaceRepository.findMembership(
+      workspaceId,
+      newOwnerId,
     );
-  }
+    if (!target) throw memberNotFound();
 
-  if (
-    requesterMembership.role === "ADMIN" &&
-    targetMembership.role === "ADMIN"
-  ) {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "Only the workspace owner can remove administrators.",
-      403,
+    const transferred = await workspaceRepository.transferOwnership(
+      workspaceId,
+      requesterId,
+      newOwnerId,
     );
-  }
 
-  return workspaceRepository.removeMember(workspaceId, targetUserId);
-},
-
-async updateMemberRole(
-  workspaceId: string,
-  requesterId: string,
-  targetUserId: string,
-  newRole: "ADMIN" | "DEVELOPER" | "VIEWER",
-) {
-  const requesterMembership = await requireWorkspaceRole(
-    workspaceId,
-    requesterId,
-    ["OWNER", "ADMIN"],
-  );
-
-  const targetMembership = await workspaceRepository.findMembership(
-    workspaceId,
-    targetUserId,
-  );
-
-  if (!targetMembership) {
-    throw new WorkspaceServiceError(
-      "MEMBER_NOT_FOUND",
-      "The specified user is not a member of this workspace.",
-      404,
-    );
-  }
-
-  if (targetMembership.role === "OWNER") {
-    throw new WorkspaceServiceError(
-      "FORBIDDEN",
-      "The workspace owner's role cannot be modified.",
-      403,
-    );
-  }
-
-  if (requesterMembership.role === "ADMIN") {
-    if (targetMembership.role === "ADMIN") {
+    if (!transferred) {
       throw new WorkspaceServiceError(
-        "FORBIDDEN",
-        "Only the workspace owner can modify administrator roles.",
-        403,
+        "MEMBERSHIP_CHANGED",
+        "Ownership could not be transferred because the membership changed. Refresh and try again.",
+        409,
       );
     }
-    if (newRole === "ADMIN") {
-      throw new WorkspaceServiceError(
-        "FORBIDDEN",
-        "Only the workspace owner can assign the administrator role.",
-        403,
-      );
-    }
-  }
 
-  return workspaceRepository.updateMemberRole(
-    workspaceId,
-    targetUserId,
-    newRole,
-  );
-},
-
+    return workspaceRepository.listMembers(workspaceId);
+  },
 };
-

@@ -17,8 +17,7 @@ datasource db {
 enum WorkspaceRole {
   OWNER
   ADMIN
-  DEVELOPER
-  VIEWER
+  MEMBER
 }
 
 enum TaskStatus {
@@ -75,7 +74,8 @@ model User {
 model Workspace {
   id          String   @id @default(uuid()) @db.Uuid
   name        String
-  rootPath    String
+  description String?
+  rootPath    String?
   createdById String   @db.Uuid
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -91,7 +91,7 @@ model Workspace {
 model WorkspaceMember {
   workspaceId String        @db.Uuid
   userId      String        @db.Uuid
-  role        WorkspaceRole @default(DEVELOPER)
+  role        WorkspaceRole @default(MEMBER)
   joinedAt    DateTime      @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -99,23 +99,27 @@ model WorkspaceMember {
 
   @@id([workspaceId, userId])
   @@index([userId, role])
+  @@index([workspaceId, role])
 }
 
+// A conversation either belongs to a workspace (shared with every member)
+// or is personal (workspaceId = null, visible only to its creator).
 model Conversation {
   id          String   @id @default(uuid()) @db.Uuid
-  workspaceId String   @db.Uuid
+  workspaceId String?  @db.Uuid
   createdById String   @db.Uuid
   title       String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy User      @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User       @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: Restrict)
   messages  Message[]
   tasks     Task[]
 
   @@index([workspaceId, updatedAt])
   @@index([createdById, createdAt])
+  @@index([createdById, workspaceId, updatedAt])
 }
 
 model Message {
