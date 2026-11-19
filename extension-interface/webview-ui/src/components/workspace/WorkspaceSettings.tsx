@@ -1,67 +1,115 @@
 import { useState, type FormEvent } from 'react';
-import { AlertTriangle, Loader2, Save, Trash2 } from 'lucide-react';
-import type { WorkspaceDetails, WorkspaceRole } from '../../types/workspace.ts';
+import { Crown, Loader2, LogOut, Save, Trash2 } from 'lucide-react';
+import type {
+  Notice,
+  WorkspaceDetails,
+  WorkspaceInput,
+  WorkspaceRole,
+} from '../../types/workspace.ts';
+import { ROLE_LABELS, canUpdateWorkspace } from '../../lib/permissions.ts';
+import { validateWorkspaceFields } from '../../lib/validation.ts';
+import NoticeBanner from './NoticeBanner.tsx';
 
 interface WorkspaceSettingsProps {
   workspace: WorkspaceDetails;
   currentUserId: string;
   loading: boolean;
-  onUpdate: (data: { name?: string; rootPath?: string }) => void;
+  onUpdate: (data: Partial<WorkspaceInput>) => void;
   onDelete: () => void;
-  errorMessage: string | null;
-  onClearError: () => void;
+  onLeave: () => void;
+  onTransferOwnership: (userId: string, email: string) => void;
+  notice: Notice | null;
+  onClearNotice: () => void;
 }
 
+/** Workspace details page: overview, editable settings, ownership and danger zone. */
 export default function WorkspaceSettings({
   workspace,
   currentUserId,
   loading,
   onUpdate,
   onDelete,
-  errorMessage,
-  onClearError,
+  onLeave,
+  onTransferOwnership,
+  notice,
+  onClearNotice,
 }: WorkspaceSettingsProps) {
   const [name, setName] = useState(workspace.name);
-  const [rootPath, setRootPath] = useState(workspace.rootPath);
+  const [description, setDescription] = useState(workspace.description ?? '');
+  const [rootPath, setRootPath] = useState(workspace.rootPath ?? '');
+  const [errors, setErrors] = useState<ReturnType<typeof validateWorkspaceFields>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
+  const [transferTarget, setTransferTarget] = useState('');
+  const [confirmTransfer, setConfirmTransfer] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
 
-  // Determine user's role
-  const currentUserMember = workspace.members.find((m) => m.userId === currentUserId);
-  const currentUserRole: WorkspaceRole = currentUserMember?.role || 'VIEWER';
+  const myRole: WorkspaceRole =
+    workspace.role ??
+    workspace.members.find((m) => m.userId === currentUserId)?.role ??
+    'MEMBER';
+  const isOwner = myRole === 'OWNER';
+  const canEdit = workspace.permissions?.canUpdate ?? canUpdateWorkspace(myRole);
+  const canDelete = workspace.permissions?.canDelete ?? isOwner;
 
-  const isOwner = currentUserRole === 'OWNER';
-  const canEdit = isOwner || currentUserRole === 'ADMIN';
+  const changes: Partial<WorkspaceInput> = {};
+  if (name.trim() !== workspace.name) changes.name = name.trim();
+  if ((description.trim() || null) !== (workspace.description ?? null)) {
+    changes.description = description.trim() || null;
+  }
+  if ((rootPath.trim() || null) !== (workspace.rootPath ?? null)) {
+    changes.rootPath = rootPath.trim() || null;
+  }
+  const hasChanges = Object.keys(changes).length > 0;
+
+  const transferCandidates = workspace.members.filter((m) => m.userId !== currentUserId);
+  const transferEmail =
+    transferCandidates.find((m) => m.userId === transferTarget)?.user?.email ?? transferTarget;
 
   function handleSave(e: FormEvent) {
     e.preventDefault();
-    if (loading || !canEdit) return;
-
-    onClearError();
-    onUpdate({
-      name: name.trim() !== workspace.name ? name.trim() : undefined,
-      rootPath: rootPath.trim() !== workspace.rootPath ? rootPath.trim() : undefined,
-    });
+    if (loading || !canEdit || !hasChanges) return;
+    const errs = validateWorkspaceFields({ name, description, rootPath });
+    setErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+    onClearNotice();
+    onUpdate(changes);
   }
-
-  const hasChanges =
-    name.trim() !== workspace.name || rootPath.trim() !== workspace.rootPath;
 
   return (
     <div className="workspace-settings-view">
-      {errorMessage && (
-        <div className="auth-alert" role="alert">
-          <AlertTriangle size={15} className="auth-alert-icon" />
-          <div className="auth-alert-content">
-            <span className="auth-alert-message">{errorMessage}</span>
-          </div>
-        </div>
-      )}
+      <NoticeBanner notice={notice} onDismiss={onClearNotice} />
 
-      {/* General Settings */}
+      <div className="metadata-grid">
+        <div className="meta-item">
+          <span className="meta-label">Your role</span>
+          <span className={`role-badge role-badge-${myRole.toLowerCase()}`}>
+            {myRole === 'OWNER' && <Crown size={11} />}
+            {ROLE_LABELS[myRole]}
+          </span>
+        </div>
+        <div className="meta-item">
+          <span className="meta-label">Members</span>
+          <span className="meta-value">{workspace.members.length}</span>
+        </div>
+        <div className="meta-item">
+          <span className="meta-label">Owner</span>
+          <span className="meta-value">
+            {workspace.members.find((m) => m.role === 'OWNER')?.user?.email ?? '—'}
+          </span>
+        </div>
+        <div className="meta-item">
+          <span className="meta-label">Created</span>
+          <span className="meta-value">{new Date(workspace.createdAt).toLocaleString()}</span>
+        </div>
+      </div>
+
       <form onSubmit={handleSave} className="settings-form">
         <div className="settings-section">
           <h4>Workspace Information</h4>
+          {!canEdit && (
+            <p className="form-hint">Only the owner and admins can edit workspace settings.</p>
+          )}
 
           <div className="form-group">
             <label htmlFor="settings-name" className="form-label">
@@ -70,48 +118,47 @@ export default function WorkspaceSettings({
             <input
               id="settings-name"
               type="text"
-              className="auth-input"
+              className={`auth-input ${errors.name ? 'has-error' : ''}`}
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={loading || !canEdit}
               maxLength={100}
             />
+            {errors.name && <div className="form-error">{errors.name}</div>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="settings-description" className="form-label">
+              Description
+            </label>
+            <textarea
+              id="settings-description"
+              className={`auth-input auth-textarea ${errors.description ? 'has-error' : ''}`}
+              value={description}
+              placeholder={canEdit ? 'Add a description' : 'No description'}
+              onChange={(e) => setDescription(e.target.value)}
+              disabled={loading || !canEdit}
+              maxLength={500}
+              rows={3}
+            />
+            {errors.description && <div className="form-error">{errors.description}</div>}
           </div>
 
           <div className="form-group">
             <label htmlFor="settings-path" className="form-label">
-              Root Path
+              Project Folder
             </label>
             <input
               id="settings-path"
               type="text"
-              className="auth-input"
+              className={`auth-input ${errors.rootPath ? 'has-error' : ''}`}
               value={rootPath}
+              placeholder="Not set"
               onChange={(e) => setRootPath(e.target.value)}
               disabled={loading || !canEdit}
               maxLength={1024}
             />
-          </div>
-
-          <div className="metadata-grid">
-            <div className="meta-item">
-              <span className="meta-label">Workspace ID:</span>
-              <span className="meta-value" title={workspace.id}>
-                {workspace.id}
-              </span>
-            </div>
-            <div className="meta-item">
-              <span className="meta-label">Created At:</span>
-              <span className="meta-value">
-                {new Date(workspace.createdAt).toLocaleString()}
-              </span>
-            </div>
-            <div className="meta-item">
-              <span className="meta-label">Your Role:</span>
-              <span className="meta-value role-highlight">
-                {currentUserRole}
-              </span>
-            </div>
+            {errors.rootPath && <div className="form-error">{errors.rootPath}</div>}
           </div>
 
           {canEdit && (
@@ -138,13 +185,113 @@ export default function WorkspaceSettings({
         </div>
       </form>
 
-      {/* Danger Zone: Delete Workspace (OWNER only) */}
       {isOwner && (
+        <div className="danger-zone-section">
+          <h4>Transfer Ownership</h4>
+          <p className="danger-zone-desc">
+            The new owner gets full control. You will become an admin.
+          </p>
+          {transferCandidates.length === 0 ? (
+            <p className="form-hint">Add another member before transferring ownership.</p>
+          ) : !confirmTransfer ? (
+            <div className="inline-form-row">
+              <select
+                className="role-select grow"
+                value={transferTarget}
+                onChange={(e) => setTransferTarget(e.target.value)}
+                disabled={loading}
+                aria-label="New owner"
+              >
+                <option value="">Select a member…</option>
+                {transferCandidates.map((m) => (
+                  <option key={m.userId} value={m.userId}>
+                    {m.user?.email ?? m.userId} ({ROLE_LABELS[m.role]})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="secondary-btn compact-btn"
+                disabled={loading || !transferTarget}
+                onClick={() => setConfirmTransfer(true)}
+              >
+                <Crown size={12} />
+                <span>Transfer</span>
+              </button>
+            </div>
+          ) : (
+            <div className="confirm-delete-box">
+              <p className="confirm-prompt">
+                Make <strong>{transferEmail}</strong> the owner of {workspace.name}?
+              </p>
+              <div className="confirm-actions">
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setConfirmTransfer(false)}
+                  disabled={loading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger-btn"
+                  disabled={loading}
+                  onClick={() => {
+                    onClearNotice();
+                    onTransferOwnership(transferTarget, transferEmail);
+                  }}
+                >
+                  <Crown size={13} />
+                  <span>Transfer Ownership</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!isOwner && (
+        <div className="danger-zone-section">
+          <h4>Leave Workspace</h4>
+          <p className="danger-zone-desc">
+            You will lose access to this workspace and its conversations.
+          </p>
+          {!confirmLeave ? (
+            <button
+              type="button"
+              className="danger-btn"
+              onClick={() => setConfirmLeave(true)}
+              disabled={loading}
+            >
+              <LogOut size={14} />
+              <span>Leave Workspace</span>
+            </button>
+          ) : (
+            <div className="confirm-actions left">
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setConfirmLeave(false)}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+              <button type="button" className="danger-btn" onClick={onLeave} disabled={loading}>
+                <LogOut size={13} />
+                <span>Confirm Leave</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canDelete && (
         <div className="danger-zone-section">
           <h4>Danger Zone</h4>
           <p className="danger-zone-desc">
-            Deleting this workspace permanently removes all associated project members,
-            conversations, tasks, and dependency analysis history.
+            Deleting this workspace permanently removes its members, conversations,
+            tasks, and dependency analysis history.
           </p>
 
           {!confirmDelete ? (
@@ -169,6 +316,7 @@ export default function WorkspaceSettings({
                 value={deleteConfirmationText}
                 onChange={(e) => setDeleteConfirmationText(e.target.value)}
                 autoFocus
+                aria-label="Type the workspace name to confirm"
               />
               <div className="confirm-actions">
                 <button
@@ -188,11 +336,7 @@ export default function WorkspaceSettings({
                   disabled={loading || deleteConfirmationText !== workspace.name}
                   onClick={onDelete}
                 >
-                  {loading ? (
-                    <Loader2 size={13} className="spinner-icon" />
-                  ) : (
-                    <Trash2 size={13} />
-                  )}
+                  {loading ? <Loader2 size={13} className="spinner-icon" /> : <Trash2 size={13} />}
                   <span>Permanently Delete</span>
                 </button>
               </div>

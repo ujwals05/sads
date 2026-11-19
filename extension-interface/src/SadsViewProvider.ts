@@ -7,6 +7,10 @@ import { AuthService } from './backend/authService';
 import type { ApiEnvelope, AuthUser } from './backend/authTypes';
 import { TokenStorage } from './backend/tokenStorage';
 import type {
+  AssignableRole,
+  Conversation,
+  ConversationDetails,
+  MessageExchange,
   Workspace,
   WorkspaceDetails,
   WorkspaceMember,
@@ -16,7 +20,7 @@ import type {
 interface PromptMessage {
   type: 'chat.prompt';
   requestId: string;
-  sessionId: string;
+  conversationId: string;
   text: string;
 }
 
@@ -66,65 +70,52 @@ type AuthMessage =
   | AuthLogoutMessage
   | AuthMeMessage;
 
-interface WorkspaceListMessage {
-  type: 'workspace.list';
-  requestId: string;
-}
-
-interface WorkspaceGetMessage {
-  type: 'workspace.get';
-  requestId: string;
-  workspaceId: string;
-}
-
-interface WorkspaceCreateMessage {
-  type: 'workspace.create';
-  requestId: string;
-  name: string;
-  rootPath: string;
-}
-
-interface WorkspaceUpdateMessage {
-  type: 'workspace.update';
-  requestId: string;
-  workspaceId: string;
-  name?: string;
-  rootPath?: string;
-}
-
-interface WorkspaceDeleteMessage {
-  type: 'workspace.delete';
-  requestId: string;
-  workspaceId: string;
-}
-
-interface WorkspaceAddMemberMessage {
-  type: 'workspace.member.add';
-  requestId: string;
-  workspaceId: string;
-  userId: string;
-  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
-}
-
-interface WorkspaceRemoveMemberMessage {
-  type: 'workspace.member.remove';
-  requestId: string;
-  workspaceId: string;
-  userId: string;
-}
-
-interface WorkspaceUpdateRoleMessage {
-  type: 'workspace.member.updateRole';
-  requestId: string;
-  workspaceId: string;
-  userId: string;
-  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
-}
-
-interface WorkspaceDetectPathMessage {
-  type: 'workspace.detectPath';
-  requestId: string;
-}
+type WorkspaceMessage =
+  | { type: 'workspace.list'; requestId: string }
+  | { type: 'workspace.get'; requestId: string; workspaceId: string }
+  | {
+      type: 'workspace.create';
+      requestId: string;
+      name: string;
+      description?: string | null;
+      rootPath?: string | null;
+    }
+  | {
+      type: 'workspace.update';
+      requestId: string;
+      workspaceId: string;
+      name?: string;
+      description?: string | null;
+      rootPath?: string | null;
+    }
+  | { type: 'workspace.delete'; requestId: string; workspaceId: string }
+  | {
+      type: 'workspace.member.add';
+      requestId: string;
+      workspaceId: string;
+      userId: string;
+      role: AssignableRole;
+    }
+  | {
+      type: 'workspace.member.remove';
+      requestId: string;
+      workspaceId: string;
+      userId: string;
+    }
+  | {
+      type: 'workspace.member.updateRole';
+      requestId: string;
+      workspaceId: string;
+      userId: string;
+      role: AssignableRole;
+    }
+  | {
+      type: 'workspace.transferOwnership';
+      requestId: string;
+      workspaceId: string;
+      userId: string;
+    }
+  | { type: 'workspace.detectPath'; requestId: string };
 
 interface UserSearchMessage {
   type: 'user.search';
@@ -135,16 +126,17 @@ interface UserSearchMessage {
   limit?: number;
 }
 
-type WorkspaceMessage =
-  | WorkspaceListMessage
-  | WorkspaceGetMessage
-  | WorkspaceCreateMessage
-  | WorkspaceUpdateMessage
-  | WorkspaceDeleteMessage
-  | WorkspaceAddMemberMessage
-  | WorkspaceRemoveMemberMessage
-  | WorkspaceUpdateRoleMessage
-  | WorkspaceDetectPathMessage;
+type ConversationMessage =
+  | { type: 'conversation.list'; requestId: string; workspaceId: string | null }
+  | { type: 'conversation.create'; requestId: string; workspaceId: string | null }
+  | { type: 'conversation.get'; requestId: string; conversationId: string }
+  | {
+      type: 'conversation.rename';
+      requestId: string;
+      conversationId: string;
+      title: string;
+    }
+  | { type: 'conversation.delete'; requestId: string; conversationId: string };
 
 type WebviewMessage =
   | PromptMessage
@@ -152,7 +144,58 @@ type WebviewMessage =
   | BackendHealthMessage
   | AuthMessage
   | WorkspaceMessage
+  | ConversationMessage
   | UserSearchMessage;
+
+const WORKSPACE_TYPES = new Set<string>([
+  'workspace.list',
+  'workspace.get',
+  'workspace.create',
+  'workspace.update',
+  'workspace.delete',
+  'workspace.member.add',
+  'workspace.member.remove',
+  'workspace.member.updateRole',
+  'workspace.transferOwnership',
+  'workspace.detectPath',
+]);
+
+const CONVERSATION_TYPES = new Set<string>([
+  'conversation.list',
+  'conversation.create',
+  'conversation.get',
+  'conversation.rename',
+  'conversation.delete',
+]);
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * IDs from the webview are interpolated into URL paths, so only well-formed
+ * UUIDs are accepted. The backend still performs the real authorization.
+ */
+function requireId(value: unknown, label: string): string {
+  if (typeof value === 'string' && UUID_PATTERN.test(value)) {
+    return value;
+  }
+  throw new ApiClientError(`Invalid ${label}.`, 0, 'INVALID_ID');
+}
+
+function optionalId(value: unknown, label: string): string | null {
+  return value === null || value === undefined || value === ''
+    ? null
+    : requireId(value, label);
+}
+
+function toErrorPayload(error: unknown, fallbackCode: string, fallbackMessage: string) {
+  const isApiError = error instanceof ApiClientError;
+  return {
+    code: isApiError ? error.code ?? fallbackCode : fallbackCode,
+    status: isApiError ? error.status : 0,
+    message: error instanceof Error ? error.message : fallbackMessage,
+  };
+}
 
 export class SadsViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'sads.chatView';
@@ -167,7 +210,7 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
     this.apiClient = new ApiClient(() =>
       vscode.workspace
         .getConfiguration('sads')
-        .get<string>('backendUrl', 'http://localhost:5000'),
+        .get<string>('backendUrl', 'http://localhost:5001'),
     );
 
     this.authService = new AuthService(
@@ -219,6 +262,10 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
 
     webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
+        if (!message || typeof message.type !== 'string') {
+          return;
+        }
+
         // 1. Backend health check
         if (
           message.type === 'backend.health' &&
@@ -231,14 +278,14 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
               .getConfiguration('sads')
               .get<string>(
                 'backendUrl',
-                'http://localhost:5000',
+                'http://localhost:5001',
               );
 
             const baseUrl = configuredUrl.replace(/\/+$/, '');
 
             const response = await fetch(
               `${baseUrl}/api/v1/health`,
-              { signal: AbortSignal.timeout(5000) },
+              { signal: AbortSignal.timeout(5001) },
             );
 
             const responseText = await response.text();
@@ -278,28 +325,27 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
         }
 
         // 3. Workspace operations
-        if (
-          message.type === 'workspace.list' ||
-          message.type === 'workspace.get' ||
-          message.type === 'workspace.create' ||
-          message.type === 'workspace.update' ||
-          message.type === 'workspace.delete' ||
-          message.type === 'workspace.member.add' ||
-          message.type === 'workspace.member.remove' ||
-          message.type === 'workspace.member.updateRole' ||
-          message.type === 'workspace.detectPath'
-        ) {
-          await this.handleWorkspaceMessage(webview, message);
+        if (WORKSPACE_TYPES.has(message.type)) {
+          await this.handleWorkspaceMessage(webview, message as WorkspaceMessage);
           return;
         }
 
-        // 4. User search operations
+        // 4. Conversation (chat session) operations
+        if (CONVERSATION_TYPES.has(message.type)) {
+          await this.handleConversationMessage(
+            webview,
+            message as ConversationMessage,
+          );
+          return;
+        }
+
+        // 5. User search operations
         if (message.type === 'user.search') {
           await this.handleUserSearchMessage(webview, message);
           return;
         }
 
-        // 3. Cancel a chat task
+        // 6. Cancel a chat task
         if (
           message.type === 'task.cancel' &&
           typeof message.requestId === 'string'
@@ -314,35 +360,93 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
-        // 4. Handle chat prompts
+        // 7. Chat prompts: persisted through the backend.
         if (
           message.type !== 'chat.prompt' ||
           typeof message.text !== 'string' ||
-          typeof message.requestId !== 'string' ||
-          typeof message.sessionId !== 'string'
+          typeof message.requestId !== 'string'
         ) {
           return;
         }
 
         const { requestId, text } = message;
 
-        // Mock response for now. The AI agent will be integrated later.
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        try {
+          const conversationId = requireId(message.conversationId, 'conversation ID');
 
-        if (cancelled.delete(requestId)) {
-          return;
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.post<ApiEnvelope<MessageExchange>>(
+              `/conversations/${conversationId}/messages`,
+              { content: text, clientRequestId: requestId },
+              { signal: AbortSignal.timeout(60_000) },
+            ),
+          );
+
+          // A cancelled request is still saved server-side; the UI simply
+          // ignores the reply and will see it when the chat is reloaded.
+          if (cancelled.delete(requestId)) {
+            return;
+          }
+
+          await webview.postMessage({
+            type: 'assistant.reply',
+            requestId,
+            text: res.data.assistantMessage?.content ?? '',
+            data: res.data,
+          });
+        } catch (error: unknown) {
+          if (cancelled.delete(requestId)) {
+            return;
+          }
+
+          await webview.postMessage({
+            type: 'task.error',
+            requestId,
+            text:
+              error instanceof Error
+                ? error.message
+                : 'The message could not be sent.',
+          });
         }
-
-        await webview.postMessage({
-          type: 'assistant.reply',
-          requestId,
-          text:
-            `I received your request:\n\n"${text}"\n\n` +
-            'The React chat UI is connected to the SADS extension host. ' +
-            'The backend and AI agent will be integrated in a later phase.',
-        });
       },
     );
+  }
+
+  /**
+   * Run an authenticated API call. If the short-lived access token has
+   * expired, refresh the session once and retry; if the refresh token is no
+   * longer valid either, tell the webview the session ended.
+   */
+  private async withAuth<T>(
+    webview: vscode.Webview,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await call();
+    } catch (error: unknown) {
+      if (
+        !(error instanceof ApiClientError) ||
+        error.status !== 401 ||
+        this.authService.getState().status !== 'authenticated'
+      ) {
+        throw error;
+      }
+
+      const user = await this.authService.restoreSession();
+
+      if (!user) {
+        await webview.postMessage({
+          type: 'auth.result',
+          operation: 'auth.expired',
+          requestId: '',
+          ok: true,
+          user: null,
+        });
+        throw error;
+      }
+
+      return call();
+    }
   }
 
   private async handleAuthMessage(
@@ -413,6 +517,7 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+
   private async handleWorkspaceMessage(
     webview: vscode.Webview,
     message: WorkspaceMessage,
@@ -429,80 +534,105 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
         }
 
         case 'workspace.list': {
-          const res = await this.apiClient.get<ApiEnvelope<Workspace[]>>(
-            '/workspaces',
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.get<ApiEnvelope<Workspace[]>>('/workspaces'),
           );
           data = res.data;
           break;
         }
 
         case 'workspace.get': {
-          const res = await this.apiClient.get<ApiEnvelope<WorkspaceDetails>>(
-            `/workspaces/${message.workspaceId}`,
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.get<ApiEnvelope<WorkspaceDetails>>(
+              `/workspaces/${workspaceId}`,
+            ),
           );
           data = res.data;
           break;
         }
 
         case 'workspace.create': {
-          const res = await this.apiClient.post<ApiEnvelope<Workspace>>(
-            '/workspaces',
-            {
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.post<ApiEnvelope<Workspace>>('/workspaces', {
               name: message.name,
-              rootPath: message.rootPath,
-            },
+              description: message.description ?? null,
+              rootPath: message.rootPath ?? null,
+            }),
           );
           data = res.data;
           break;
         }
 
         case 'workspace.update': {
-          const res = await this.apiClient.patch<ApiEnvelope<Workspace>>(
-            `/workspaces/${message.workspaceId}`,
-            {
-              name: message.name,
-              rootPath: message.rootPath,
-            },
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.patch<ApiEnvelope<Workspace>>(
+              `/workspaces/${workspaceId}`,
+              {
+                name: message.name,
+                description: message.description,
+                rootPath: message.rootPath,
+              },
+            ),
           );
           data = res.data;
           break;
         }
 
         case 'workspace.delete': {
-          await this.apiClient.delete(`/workspaces/${message.workspaceId}`);
-          data = { workspaceId: message.workspaceId };
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          await this.withAuth(webview, () =>
+            this.apiClient.delete(`/workspaces/${workspaceId}`),
+          );
+          data = { workspaceId };
           break;
         }
 
         case 'workspace.member.add': {
-          const res = await this.apiClient.post<ApiEnvelope<WorkspaceMember>>(
-            `/workspaces/${message.workspaceId}/members`,
-            {
-              userId: message.userId,
-              role: message.role,
-            },
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const userId = requireId(message.userId, 'user ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.post<ApiEnvelope<WorkspaceMember>>(
+              `/workspaces/${workspaceId}/members`,
+              { userId, role: message.role },
+            ),
           );
           data = res.data;
           break;
         }
 
         case 'workspace.member.remove': {
-          await this.apiClient.delete(
-            `/workspaces/${message.workspaceId}/members/${message.userId}`,
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const userId = requireId(message.userId, 'user ID');
+          await this.withAuth(webview, () =>
+            this.apiClient.delete(`/workspaces/${workspaceId}/members/${userId}`),
           );
-          data = {
-            workspaceId: message.workspaceId,
-            userId: message.userId,
-          };
+          data = { workspaceId, userId };
           break;
         }
 
         case 'workspace.member.updateRole': {
-          const res = await this.apiClient.patch<ApiEnvelope<WorkspaceMember>>(
-            `/workspaces/${message.workspaceId}/members/${message.userId}`,
-            {
-              role: message.role,
-            },
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const userId = requireId(message.userId, 'user ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.patch<ApiEnvelope<WorkspaceMember>>(
+              `/workspaces/${workspaceId}/members/${userId}`,
+              { role: message.role },
+            ),
+          );
+          data = res.data;
+          break;
+        }
+
+        case 'workspace.transferOwnership': {
+          const workspaceId = requireId(message.workspaceId, 'workspace ID');
+          const userId = requireId(message.userId, 'user ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.post<ApiEnvelope<WorkspaceMember[]>>(
+              `/workspaces/${workspaceId}/transfer-ownership`,
+              { userId },
+            ),
           );
           data = res.data;
           break;
@@ -517,21 +647,101 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
         data,
       });
     } catch (error: unknown) {
-      const isApiError = error instanceof ApiClientError;
-
       await webview.postMessage({
         type: 'workspace.result',
         operation: message.type,
         requestId: message.requestId,
         ok: false,
-        error: {
-          code: isApiError ? error.code : 'WORKSPACE_ERROR',
-          status: isApiError ? error.status : 0,
-          message:
-            error instanceof Error
-              ? error.message
-              : 'Workspace operation failed.',
-        },
+        error: toErrorPayload(error, 'WORKSPACE_ERROR', 'Workspace operation failed.'),
+      });
+    }
+  }
+
+  private async handleConversationMessage(
+    webview: vscode.Webview,
+    message: ConversationMessage,
+  ): Promise<void> {
+    // Echo the scope back so the webview can ignore stale responses (e.g. a
+    // conversation list that arrives after the user switched workspace).
+    const context = {
+      workspaceId: 'workspaceId' in message ? message.workspaceId ?? null : undefined,
+      conversationId: 'conversationId' in message ? message.conversationId : undefined,
+    };
+
+    try {
+      let data: unknown = null;
+
+      switch (message.type) {
+        case 'conversation.list': {
+          const workspaceId = optionalId(message.workspaceId, 'workspace ID');
+          const query = workspaceId ? `?workspaceId=${workspaceId}` : '';
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.get<ApiEnvelope<Conversation[]>>(`/conversations${query}`),
+          );
+          data = res.data;
+          break;
+        }
+
+        case 'conversation.create': {
+          const workspaceId = optionalId(message.workspaceId, 'workspace ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.post<ApiEnvelope<Conversation>>('/conversations', {
+              workspaceId,
+            }),
+          );
+          data = res.data;
+          break;
+        }
+
+        case 'conversation.get': {
+          const conversationId = requireId(message.conversationId, 'conversation ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.get<ApiEnvelope<ConversationDetails>>(
+              `/conversations/${conversationId}`,
+            ),
+          );
+          data = res.data;
+          break;
+        }
+
+        case 'conversation.rename': {
+          const conversationId = requireId(message.conversationId, 'conversation ID');
+          const res = await this.withAuth(webview, () =>
+            this.apiClient.patch<ApiEnvelope<Conversation>>(
+              `/conversations/${conversationId}`,
+              { title: message.title },
+            ),
+          );
+          data = res.data;
+          break;
+        }
+
+        case 'conversation.delete': {
+          const conversationId = requireId(message.conversationId, 'conversation ID');
+          await this.withAuth(webview, () =>
+            this.apiClient.delete(`/conversations/${conversationId}`),
+          );
+          data = { conversationId };
+          break;
+        }
+      }
+
+      await webview.postMessage({
+        type: 'conversation.result',
+        operation: message.type,
+        requestId: message.requestId,
+        ok: true,
+        context,
+        data,
+      });
+    } catch (error: unknown) {
+      await webview.postMessage({
+        type: 'conversation.result',
+        operation: message.type,
+        requestId: message.requestId,
+        ok: false,
+        context,
+        error: toErrorPayload(error, 'CONVERSATION_ERROR', 'Conversation operation failed.'),
       });
     }
   }
@@ -542,17 +752,19 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     try {
       const queryParams = new URLSearchParams({
-        q: message.query,
+        q: String(message.query ?? ''),
         page: String(message.page ?? 1),
         limit: String(message.limit ?? 10),
       });
 
       if (message.workspaceId) {
-        queryParams.set('workspaceId', message.workspaceId);
+        queryParams.set('workspaceId', requireId(message.workspaceId, 'workspace ID'));
       }
 
-      const res = await this.apiClient.get<UserSearchResponse>(
-        `/users/search?${queryParams.toString()}`,
+      const res = await this.withAuth(webview, () =>
+        this.apiClient.get<UserSearchResponse>(
+          `/users/search?${queryParams.toString()}`,
+        ),
       );
 
       await webview.postMessage({
@@ -563,20 +775,11 @@ export class SadsViewProvider implements vscode.WebviewViewProvider {
         pagination: res.pagination,
       });
     } catch (error: unknown) {
-      const isApiError = error instanceof ApiClientError;
-
       await webview.postMessage({
         type: 'user.search.result',
         requestId: message.requestId,
         ok: false,
-        error: {
-          code: isApiError ? error.code : 'SEARCH_ERROR',
-          status: isApiError ? error.status : 0,
-          message:
-            error instanceof Error
-              ? error.message
-              : 'Failed to search users.',
-        },
+        error: toErrorPayload(error, 'SEARCH_ERROR', 'Failed to search users.'),
       });
     }
   }

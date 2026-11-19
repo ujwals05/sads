@@ -1,23 +1,46 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import ChatHeader from './components/ChatHeader.tsx';
-import MessageList, {
-  type ChatMessage,
-} from './components/MessageList.tsx';
+import MessageList, { type ChatMessage } from './components/MessageList.tsx';
 import PromptComposer from './components/PromptComposer.tsx';
-import SessionList, {
-  type ChatSession,
-} from './components/SessionList.tsx';
+import SessionList from './components/SessionList.tsx';
 import AuthScreen from './components/auth/AuthScreen.tsx';
 import WorkspaceSelector from './components/workspace/WorkspaceSelector.tsx';
 import WorkspaceModal from './components/workspace/WorkspaceModal.tsx';
 import type { AuthMode, AuthUser } from './types/auth.ts';
 import type {
+  AssignableRole,
+  Notice,
   UserSearchResult,
   Workspace,
   WorkspaceDetails,
+  WorkspaceInput,
+  WorkspaceModalTab,
   WorkspaceRole,
 } from './types/workspace.ts';
+import type {
+  Conversation,
+  ConversationDetails,
+  MessageExchange,
+} from './types/conversation.ts';
+import { ROLE_LABELS, canModifyConversation } from './lib/permissions.ts';
+import {
+  isSameScope,
+  toChatMessages,
+  upsertConversation,
+} from './lib/conversations.ts';
+import {
+  createId,
+  persistState,
+  readPersistedState,
+  vscode,
+} from './lib/vscode.ts';
 import { ShieldCheck } from 'lucide-react';
+
+interface HostError {
+  code?: string;
+  status?: number;
+  message?: string;
+}
 
 interface HostMessage {
   type:
@@ -27,6 +50,7 @@ interface HostMessage {
     | 'backend.health.result'
     | 'auth.result'
     | 'workspace.result'
+    | 'conversation.result'
     | 'user.search.result';
   text?: string;
   requestId?: string;
@@ -35,380 +59,538 @@ interface HostMessage {
   operation?: string;
   user?: AuthUser | null;
   data?: any;
-  pagination?: any;
-  error?: {
-    code?: string;
-    status?: number;
-    message?: string;
-  };
+  context?: { workspaceId?: string | null; conversationId?: string };
+  error?: HostError;
 }
 
 interface PendingRequest {
-  sessionId: string;
+  conversationId: string;
   requestId: string;
 }
 
-const vscode =
-  typeof window !== 'undefined' && typeof window.acquireVsCodeApi === 'function'
-    ? window.acquireVsCodeApi()
-    : {
-        postMessage: (message: unknown) => {
-          console.log('[SADS webview mock vscode.postMessage]:', message);
-        },
-        getState: () => ({}),
-        setState: () => {},
-      };
+/** Messages shown when a workspace operation succeeds, keyed by request id. */
+type SuccessMessages = Map<string, string>;
 
-function createId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+const persisted = readPersistedState();
+
+function post(type: string, payload: Record<string, unknown> = {}): string {
+  const requestId = createId();
+  vscode.postMessage({ type, requestId, ...payload });
+  return requestId;
 }
 
 export default function App() {
-  const [initialSessionId] = useState(() => createId());
-
-  // Authentication State
+  // Authentication
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authRestoring, setAuthRestoring] = useState(true);
   const [authMode, setAuthMode] = useState<AuthMode>('login');
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-
-  // Backend Health Status
   const [backendStatus, setBackendStatus] = useState('Not tested');
 
-  // Workspace State
+  // Workspaces
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+  const [workspacesLoading, setWorkspacesLoading] = useState(false);
+  const [workspacesError, setWorkspacesError] = useState<string | null>(null);
+  const [workspacesReady, setWorkspacesReady] = useState(false);
+  // null = personal chats.
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
+    persisted.workspaceId ?? null,
+  );
   const [activeWorkspaceDetails, setActiveWorkspaceDetails] =
     useState<WorkspaceDetails | null>(null);
-  const [workspacesLoading, setWorkspacesLoading] = useState(false);
+  const [detailsLoading, setDetailsLoading] = useState(false);
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false);
-  const [workspaceModalTab, setWorkspaceModalTab] = useState<
-    'workspaces' | 'details' | 'members' | 'create'
-  >('workspaces');
-  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-  const [detectedPath, setDetectedPath] = useState<string>('');
+  const [workspaceModalTab, setWorkspaceModalTab] =
+    useState<WorkspaceModalTab>('workspaces');
+  const [mutating, setMutating] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [detectedPath, setDetectedPath] = useState('');
   const [searchResults, setSearchResults] = useState<UserSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [searchedQuery, setSearchedQuery] = useState('');
 
-  // Chat State
-  const [sessions, setSessions] = useState<ChatSession[]>([
-    { id: initialSessionId, title: 'New conversation' },
-  ]);
-  const [activeSessionId, setActiveSessionId] = useState(initialSessionId);
-  const [messagesBySession, setMessagesBySession] = useState<
+  // Conversations (chat sessions) for the active scope
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [messagesByConversation, setMessagesByConversation] = useState<
     Record<string, ChatMessage[]>
   >({});
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Refs read by the (once-registered) host message listener.
   const pending = useRef<PendingRequest | null>(null);
+  const pendingPrompt = useRef<string | null>(null);
+  const scopeRef = useRef<string | null>(activeWorkspaceId);
+  const scopeChosenRef = useRef(persisted.workspaceId !== undefined);
+  const activeConversationRef = useRef<string | null>(null);
+  const loadedConversations = useRef(new Set<string>());
+  const userRef = useRef<AuthUser | null>(null);
+  const workspacesRef = useRef<Workspace[]>([]);
+  const successMessages = useRef<SuccessMessages>(new Map());
+  const latestSearch = useRef<{ requestId: string; query: string } | null>(null);
 
-  // Determine current user's role in active workspace
-  const activeRole: WorkspaceRole | undefined =
-    activeWorkspaceDetails?.members.find((m) => m.userId === user?.id)?.role;
+  useEffect(() => {
+    userRef.current = user;
+    workspacesRef.current = workspaces;
+  }, [user, workspaces]);
 
-  // Filter conversations for the active workspace
-  const currentWorkspaceSessions = sessions.filter(
-    (s) =>
-      !s.workspaceId ||
-      !activeWorkspaceId ||
-      s.workspaceId === activeWorkspaceId,
-  );
+  const activeRole: WorkspaceRole | null =
+    (activeWorkspaceDetails?.id === activeWorkspaceId ? activeWorkspaceDetails?.role : null) ??
+    workspaces.find((w) => w.id === activeWorkspaceId)?.role ??
+    null;
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
+  const messages = activeConversationId
+    ? messagesByConversation[activeConversationId] ?? []
+    : [];
 
-  const messages = messagesBySession[activeSessionId] ?? [];
+  // ---------------------------------------------------------------- helpers
 
-  function testBackendConnection() {
-    setBackendStatus('Checking backend...');
-
-    vscode.postMessage({
-      type: 'backend.health',
-      requestId: createId(),
-    });
+  function selectConversation(id: string | null) {
+    activeConversationRef.current = id;
+    setActiveConversationId(id);
+    if (id && !loadedConversations.current.has(id)) {
+      setHistoryLoadingId(id);
+      post('conversation.get', { conversationId: id });
+    }
   }
 
-  function addMessage(sessionId: string, message: ChatMessage) {
-    setMessagesBySession((current) => ({
+  function addMessage(conversationId: string, message: ChatMessage) {
+    setMessagesByConversation((current) => ({
       ...current,
-      [sessionId]: [...(current[sessionId] ?? []), message],
+      [conversationId]: [...(current[conversationId] ?? []), message],
     }));
   }
 
-  function newChat() {
+  function cancelPending() {
     if (pending.current) {
-      vscode.postMessage({
-        type: 'task.cancel',
-        requestId: pending.current.requestId,
-      });
+      vscode.postMessage({ type: 'task.cancel', requestId: pending.current.requestId });
       pending.current = null;
     }
-
+    pendingPrompt.current = null;
     setBusy(false);
+  }
 
-    const id = createId();
-    setSessions((current) => [
-      {
-        id,
-        title: 'New conversation',
-        workspaceId: activeWorkspaceId ?? undefined,
-      },
-      ...current,
-    ]);
-    setActiveSessionId(id);
+  function loadWorkspaces() {
+    setWorkspacesLoading(true);
+    setWorkspacesError(null);
+    post('workspace.list');
+  }
+
+  function loadWorkspaceDetails(workspaceId: string) {
+    setDetailsLoading(true);
+    post('workspace.get', { workspaceId });
+  }
+
+  function loadConversations(scope: string | null) {
+    setConversationsLoading(true);
+    setConversationsError(null);
+    post('conversation.list', { workspaceId: scope });
+  }
+
+  function workspaceOp(type: string, payload: Record<string, unknown>, success?: string) {
+    setMutating(true);
+    setNotice(null);
+    const requestId = post(type, payload);
+    if (success) successMessages.current.set(requestId, success);
+  }
+
+  const selectScope = useCallback((workspaceId: string | null) => {
+    scopeChosenRef.current = true;
+    setActiveWorkspaceId(workspaceId);
+  }, []);
+
+  function resetAppState() {
+    cancelPending();
+    setWorkspaces([]);
+    setWorkspacesReady(false);
+    setActiveWorkspaceDetails(null);
+    setConversations([]);
+    setMessagesByConversation({});
+    loadedConversations.current.clear();
+    activeConversationRef.current = null;
+    setActiveConversationId(null);
+    setSearchResults([]);
+    setNotice(null);
+    setWorkspaceModalOpen(false);
+  }
+
+  // ------------------------------------------------------------ chat actions
+
+  function dispatchPrompt(conversationId: string, text: string) {
+    const requestId = createId();
+    addMessage(conversationId, { id: `local-${requestId}`, role: 'user', text });
+    pending.current = { conversationId, requestId };
+    setBusy(true);
+    vscode.postMessage({ type: 'chat.prompt', requestId, conversationId, text });
   }
 
   function sendPrompt(text: string) {
     if (busy) return;
-
-    const requestId = createId();
-    const sessionId = activeSessionId;
-
-    addMessage(sessionId, {
-      id: createId(),
-      role: 'user',
-      text,
-    });
-
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === sessionId && session.title === 'New conversation'
-          ? {
-              ...session,
-              title: text.slice(0, 36),
-            }
-          : session,
-      ),
-    );
-
-    pending.current = { sessionId, requestId };
+    const conversationId = activeConversationRef.current;
+    if (conversationId) {
+      dispatchPrompt(conversationId, text);
+      return;
+    }
+    // No conversation yet: create one in the current scope, then send.
+    pendingPrompt.current = text;
     setBusy(true);
+    post('conversation.create', { workspaceId: scopeRef.current });
+  }
 
-    vscode.postMessage({
-      type: 'chat.prompt',
-      requestId,
-      sessionId,
-      text,
-    });
+  function newChat() {
+    cancelPending();
+    const current = activeConversationRef.current;
+    // Reuse an empty conversation instead of piling up blank ones.
+    if (current && loadedConversations.current.has(current) && messages.length === 0) {
+      return;
+    }
+    post('conversation.create', { workspaceId: scopeRef.current });
   }
 
   function cancelRequest() {
     if (pending.current) {
-      vscode.postMessage({
-        type: 'task.cancel',
-        requestId: pending.current.requestId,
-      });
+      vscode.postMessage({ type: 'task.cancel', requestId: pending.current.requestId });
     }
   }
 
-  // Auth Handlers
+  // ------------------------------------------------------------ auth actions
+
+  function testBackendConnection() {
+    setBackendStatus('Checking backend...');
+    post('backend.health');
+  }
+
   function handleLogin({ email, password }: { email: string; password: string }) {
     setAuthSubmitting(true);
     setAuthError(null);
-
-    const requestId = createId();
-    vscode.postMessage({
-      type: 'auth.login',
-      requestId,
-      email,
-      password,
-    });
+    post('auth.login', { email, password });
   }
 
-  function handleRegister({
-    email,
-    password,
-  }: {
-    email: string;
-    password: string;
-  }) {
+  function handleRegister({ email, password }: { email: string; password: string }) {
     setAuthSubmitting(true);
     setAuthError(null);
-
-    const requestId = createId();
-    vscode.postMessage({
-      type: 'auth.register',
-      requestId,
-      email,
-      password,
-    });
+    post('auth.register', { email, password });
   }
 
   function handleLogout() {
-    if (pending.current) {
-      cancelRequest();
-      pending.current = null;
-      setBusy(false);
-    }
-
-    const requestId = createId();
-    vscode.postMessage({
-      type: 'auth.logout',
-      requestId,
-    });
-
+    resetAppState();
+    post('auth.logout');
     setUser(null);
     setAuthError(null);
     setAuthMode('login');
-    setWorkspaces([]);
-    setActiveWorkspaceId(null);
-    setActiveWorkspaceDetails(null);
   }
 
-  // Workspace Messaging Handlers
-  function loadWorkspaces() {
-    setWorkspacesLoading(true);
-    vscode.postMessage({
-      type: 'workspace.list',
-      requestId: createId(),
-    });
+  // ------------------------------------------------------- workspace actions
+
+  function handleCreateWorkspace(data: WorkspaceInput) {
+    workspaceOp('workspace.create', { ...data }, `Workspace "${data.name}" created. You are its owner.`);
   }
 
-  function loadWorkspaceDetails(workspaceId: string) {
-    vscode.postMessage({
-      type: 'workspace.get',
-      requestId: createId(),
-      workspaceId,
-    });
-  }
-
-  function handleCreateWorkspace(data: { name: string; rootPath: string }) {
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.create',
-      requestId: createId(),
-      name: data.name,
-      rootPath: data.rootPath,
-    });
-  }
-
-  function handleUpdateWorkspace(data: { name?: string; rootPath?: string }) {
+  function handleUpdateWorkspace(data: Partial<WorkspaceInput>) {
     if (!activeWorkspaceId) return;
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.update',
-      requestId: createId(),
-      workspaceId: activeWorkspaceId,
-      name: data.name,
-      rootPath: data.rootPath,
-    });
+    workspaceOp('workspace.update', { workspaceId: activeWorkspaceId, ...data }, 'Workspace settings saved.');
   }
 
   function handleDeleteWorkspace(workspaceId: string) {
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.delete',
-      requestId: createId(),
-      workspaceId,
-    });
+    workspaceOp('workspace.delete', { workspaceId }, 'Workspace deleted.');
   }
 
-  function handleAddWorkspaceMember(
-    userId: string,
-    role: 'ADMIN' | 'DEVELOPER' | 'VIEWER',
-  ) {
+  function handleAddMember(target: UserSearchResult, role: AssignableRole) {
     if (!activeWorkspaceId) return;
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.member.add',
-      requestId: createId(),
-      workspaceId: activeWorkspaceId,
-      userId,
-      role,
-    });
+    workspaceOp(
+      'workspace.member.add',
+      { workspaceId: activeWorkspaceId, userId: target.id, role },
+      `Added ${target.email} as ${ROLE_LABELS[role]}.`,
+    );
   }
 
-  function handleRemoveWorkspaceMember(userId: string) {
+  function handleRemoveMember(userId: string, email: string) {
     if (!activeWorkspaceId) return;
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.member.remove',
-      requestId: createId(),
-      workspaceId: activeWorkspaceId,
-      userId,
-    });
+    const self = userId === user?.id;
+    workspaceOp(
+      'workspace.member.remove',
+      { workspaceId: activeWorkspaceId, userId },
+      self ? `You left ${activeWorkspace?.name ?? 'the workspace'}.` : `Removed ${email} from the workspace.`,
+    );
   }
 
-  function handleUpdateWorkspaceMemberRole(
-    userId: string,
-    role: 'ADMIN' | 'DEVELOPER' | 'VIEWER',
-  ) {
+  function handleUpdateMemberRole(userId: string, email: string, role: AssignableRole) {
     if (!activeWorkspaceId) return;
-    setWorkspacesLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'workspace.member.updateRole',
-      requestId: createId(),
-      workspaceId: activeWorkspaceId,
-      userId,
-      role,
-    });
+    workspaceOp(
+      'workspace.member.updateRole',
+      { workspaceId: activeWorkspaceId, userId, role },
+      `${email} is now ${ROLE_LABELS[role]}.`,
+    );
+  }
+
+  function handleTransferOwnership(userId: string, email: string) {
+    if (!activeWorkspaceId) return;
+    workspaceOp(
+      'workspace.transferOwnership',
+      { workspaceId: activeWorkspaceId, userId },
+      `${email} is now the owner. You are an admin.`,
+    );
   }
 
   function handleSearchUsers(query: string) {
+    if (!activeWorkspaceId) return;
     setSearchLoading(true);
-    setWorkspaceError(null);
-    vscode.postMessage({
-      type: 'user.search',
-      requestId: createId(),
-      query,
-      workspaceId: activeWorkspaceId || undefined,
-    });
+    const requestId = post('user.search', { query, workspaceId: activeWorkspaceId });
+    latestSearch.current = { requestId, query };
   }
 
-  function requestDetectPath() {
-    vscode.postMessage({
-      type: 'workspace.detectPath',
-      requestId: createId(),
-    });
-  }
+  // --------------------------------------------------------------- effects
 
-  function handleSelectWorkspace(workspaceId: string) {
-    setActiveWorkspaceId(workspaceId);
-    loadWorkspaceDetails(workspaceId);
-  }
-
-  // Restore session when webview loads
+  // Restore the session when the webview loads.
   useEffect(() => {
-    const requestId = createId();
-    vscode.postMessage({
-      type: 'auth.restore',
-      requestId,
-    });
-
+    post('auth.restore');
     const timer = setTimeout(() => {
       setAuthRestoring((current) => (current ? false : current));
     }, 6000);
-
     return () => clearTimeout(timer);
   }, []);
 
-  // When user is authenticated, load workspaces and detect path
+  // Once authenticated, load workspaces and detect the VS Code folder.
   useEffect(() => {
     if (user) {
       loadWorkspaces();
-      requestDetectPath();
+      post('workspace.detectPath');
     }
   }, [user]);
 
-  // Load details when activeWorkspaceId changes
+  // Whenever the scope changes, load its details and chat sessions.
   useEffect(() => {
+    scopeRef.current = activeWorkspaceId;
+    if (!user || !workspacesReady) return;
+
+    persistState({ workspaceId: activeWorkspaceId });
+    cancelPending();
+    activeConversationRef.current = null;
+    setActiveConversationId(null);
+    setConversations([]);
+    setSearchResults([]);
+    setSearchedQuery('');
+
     if (activeWorkspaceId) {
       loadWorkspaceDetails(activeWorkspaceId);
     } else {
       setActiveWorkspaceDetails(null);
     }
-  }, [activeWorkspaceId]);
+    loadConversations(activeWorkspaceId);
+    // Only the scope (and readiness) should trigger a reload.
+  }, [activeWorkspaceId, user, workspacesReady]);
 
-  // Handle incoming messages from VS Code extension host
+  // Messages from the extension host.
   useEffect(() => {
+    function onWorkspaceResult(message: HostMessage) {
+      const operation = message.operation;
+      const success = message.requestId
+        ? successMessages.current.get(message.requestId)
+        : undefined;
+      if (message.requestId) successMessages.current.delete(message.requestId);
+
+      if (operation === 'workspace.list') {
+        setWorkspacesLoading(false);
+        if (!message.ok) {
+          setWorkspacesError(message.error?.message || 'Could not load workspaces.');
+          setWorkspacesReady(true);
+          return;
+        }
+        const list: Workspace[] = Array.isArray(message.data) ? message.data : [];
+        setWorkspaces(list);
+
+        const current = scopeRef.current;
+        let next: string | null;
+        if (current && list.some((w) => w.id === current)) next = current;
+        else if (current === null && scopeChosenRef.current) next = null;
+        else next = list[0]?.id ?? null;
+
+        setActiveWorkspaceId(next);
+        setWorkspacesReady(true);
+        return;
+      }
+
+      if (operation === 'workspace.detectPath') {
+        if (message.ok) setDetectedPath(message.data?.path || '');
+        return;
+      }
+
+      if (operation === 'workspace.get') {
+        setDetailsLoading(false);
+        if (!message.ok) {
+          // Lost access (removed / deleted): fall back to another scope.
+          if (message.error?.status === 404) {
+            setNotice({ kind: 'error', text: 'You no longer have access to that workspace.' });
+            scopeChosenRef.current = false;
+            scopeRef.current = null;
+            loadWorkspaces();
+          } else {
+            setNotice({ kind: 'error', text: message.error?.message || 'Could not load workspace.' });
+          }
+          return;
+        }
+        const details = message.data as WorkspaceDetails;
+        if (details.id === scopeRef.current) setActiveWorkspaceDetails(details);
+        return;
+      }
+
+      // Mutations
+      setMutating(false);
+
+      if (!message.ok) {
+        setNotice({ kind: 'error', text: message.error?.message || 'Workspace operation failed.' });
+        return;
+      }
+
+      if (success) setNotice({ kind: 'success', text: success });
+      const scope = scopeRef.current;
+
+      switch (operation) {
+        case 'workspace.create': {
+          const created = message.data as Workspace;
+          setWorkspaces((prev) => [created, ...prev.filter((w) => w.id !== created.id)]);
+          selectScope(created.id);
+          setWorkspaceModalTab('members');
+          break;
+        }
+        case 'workspace.update': {
+          const updated = message.data as Workspace;
+          setWorkspaces((prev) =>
+            prev.map((w) => (w.id === updated.id ? { ...w, ...updated } : w)),
+          );
+          if (scope === updated.id) loadWorkspaceDetails(updated.id);
+          break;
+        }
+        case 'workspace.delete': {
+          const deletedId = message.data?.workspaceId as string;
+          const remaining = workspacesRef.current.filter((w) => w.id !== deletedId);
+          setWorkspaces(remaining);
+          if (scope === deletedId) selectScope(remaining[0]?.id ?? null);
+          setWorkspaceModalTab('workspaces');
+          break;
+        }
+        case 'workspace.member.remove': {
+          const removedId = message.data?.userId as string;
+          if (removedId === userRef.current?.id) {
+            // Left the workspace.
+            const remaining = workspacesRef.current.filter((w) => w.id !== scope);
+            setWorkspaces(remaining);
+            selectScope(remaining[0]?.id ?? null);
+            setWorkspaceModalTab('workspaces');
+          } else if (scope) {
+            loadWorkspaceDetails(scope);
+            loadWorkspaces();
+          }
+          break;
+        }
+        case 'workspace.member.add': {
+          const addedId = message.data?.userId as string;
+          setSearchResults((prev) => prev.filter((u) => u.id !== addedId));
+          if (scope) loadWorkspaceDetails(scope);
+          loadWorkspaces();
+          break;
+        }
+        case 'workspace.member.updateRole':
+        case 'workspace.transferOwnership': {
+          if (scope) loadWorkspaceDetails(scope);
+          loadWorkspaces();
+          break;
+        }
+      }
+    }
+
+    function onConversationResult(message: HostMessage) {
+      const operation = message.operation;
+      const contextScope = message.context?.workspaceId;
+
+      if (!message.ok) {
+        const text = message.error?.message || 'Conversation operation failed.';
+        if (operation === 'conversation.list') {
+          if (!isSameScope(contextScope, scopeRef.current)) return;
+          setConversationsLoading(false);
+          setConversationsError(text);
+          return;
+        }
+        if (operation === 'conversation.get') {
+          setHistoryLoadingId(null);
+          setConversationsError(text);
+          if (message.error?.status === 404 && message.context?.conversationId) {
+            const goneId = message.context.conversationId;
+            setConversations((prev) => prev.filter((c) => c.id !== goneId));
+            if (activeConversationRef.current === goneId) selectConversation(null);
+          }
+          return;
+        }
+        if (operation === 'conversation.create' && pendingPrompt.current) {
+          pendingPrompt.current = null;
+          setBusy(false);
+        }
+        setConversationsError(text);
+        return;
+      }
+
+      switch (operation) {
+        case 'conversation.list': {
+          if (!isSameScope(contextScope, scopeRef.current)) return;
+          const list: Conversation[] = Array.isArray(message.data) ? message.data : [];
+          setConversations(list);
+          setConversationsLoading(false);
+          if (!activeConversationRef.current && list.length > 0) {
+            selectConversation(list[0].id);
+          }
+          break;
+        }
+        case 'conversation.create': {
+          const created = message.data as Conversation;
+          if (!isSameScope(created.workspaceId, scopeRef.current)) return;
+          loadedConversations.current.add(created.id);
+          setMessagesByConversation((prev) => ({ ...prev, [created.id]: [] }));
+          setConversations((prev) => upsertConversation(prev, created));
+          selectConversation(created.id);
+          setConversationsError(null);
+          const text = pendingPrompt.current;
+          pendingPrompt.current = null;
+          if (text) dispatchPrompt(created.id, text);
+          break;
+        }
+        case 'conversation.get': {
+          const details = message.data as ConversationDetails;
+          loadedConversations.current.add(details.id);
+          setMessagesByConversation((prev) => ({
+            ...prev,
+            [details.id]: toChatMessages(details.messages, userRef.current?.id ?? ''),
+          }));
+          setHistoryLoadingId((current) => (current === details.id ? null : current));
+          break;
+        }
+        case 'conversation.rename': {
+          const renamed = message.data as Conversation;
+          setConversations((prev) =>
+            prev.map((c) => (c.id === renamed.id ? { ...c, title: renamed.title } : c)),
+          );
+          break;
+        }
+        case 'conversation.delete': {
+          const deletedId = message.data?.conversationId as string;
+          loadedConversations.current.delete(deletedId);
+          setConversations((prev) => prev.filter((c) => c.id !== deletedId));
+          if (activeConversationRef.current === deletedId) {
+            if (pending.current?.conversationId === deletedId) cancelPending();
+            selectConversation(null);
+          }
+          break;
+        }
+      }
+    }
+
     function handleMessage(event: MessageEvent<HostMessage>) {
       const message = event.data;
       if (!message || typeof message.type !== 'string') return;
 
-      // 1. Backend health check result
       if (message.type === 'backend.health.result') {
         setBackendStatus(
           message.ok
@@ -418,33 +600,35 @@ export default function App() {
         return;
       }
 
-      // 2. Authentication result
       if (message.type === 'auth.result') {
         const operation = message.operation;
 
         if (operation === 'auth.restore') {
           setAuthRestoring(false);
-          if (message.ok && message.user) {
-            setUser(message.user);
-          } else {
-            setUser(null);
-          }
+          setUser(message.ok && message.user ? message.user : null);
+          return;
+        }
+
+        if (operation === 'auth.expired') {
+          resetAppState();
+          setUser(null);
+          setAuthMode('login');
+          setAuthError('Your session has expired. Please sign in again.');
           return;
         }
 
         if (operation === 'auth.login' || operation === 'auth.register') {
           setAuthSubmitting(false);
-
           if (message.ok && message.user) {
             setUser(message.user);
             setAuthError(null);
           } else {
-            const defaultMsg =
-              operation === 'auth.login'
-                ? 'Invalid email or password.'
-                : 'Registration failed. Please try again.';
-
-            setAuthError(message.error?.message || defaultMsg);
+            setAuthError(
+              message.error?.message ||
+                (operation === 'auth.login'
+                  ? 'Invalid email or password.'
+                  : 'Registration failed. Please try again.'),
+            );
           }
           return;
         }
@@ -457,129 +641,38 @@ export default function App() {
           return;
         }
 
-        if (operation === 'auth.me') {
-          if (message.ok && message.user) {
-            setUser(message.user);
-          }
-          return;
+        if (operation === 'auth.me' && message.ok && message.user) {
+          setUser(message.user);
         }
-
         return;
       }
 
-      // 3. Workspace result
       if (message.type === 'workspace.result') {
-        setWorkspacesLoading(false);
-
-        if (!message.ok) {
-          setWorkspaceError(
-            message.error?.message || 'Workspace operation failed.',
-          );
-          return;
-        }
-
-        const operation = message.operation;
-
-        if (operation === 'workspace.detectPath') {
-          setDetectedPath(message.data?.path || '');
-          return;
-        }
-
-        if (operation === 'workspace.list') {
-          const list: Workspace[] = Array.isArray(message.data)
-            ? message.data
-            : [];
-          setWorkspaces(list);
-
-          // If no active workspace or active not in list, select first
-          if (list.length > 0) {
-            setActiveWorkspaceId((current) => {
-              if (current && list.some((w) => w.id === current)) {
-                return current;
-              }
-              return list[0].id;
-            });
-          } else {
-            setActiveWorkspaceId(null);
-            setActiveWorkspaceDetails(null);
-          }
-          return;
-        }
-
-        if (operation === 'workspace.get') {
-          setActiveWorkspaceDetails(message.data as WorkspaceDetails);
-          return;
-        }
-
-        if (operation === 'workspace.create') {
-          const newWs = message.data as Workspace;
-          setWorkspaces((prev) => [newWs, ...prev]);
-          setActiveWorkspaceId(newWs.id);
-          loadWorkspaceDetails(newWs.id);
-          setWorkspaceModalTab('details');
-          return;
-        }
-
-        if (operation === 'workspace.update') {
-          const updated = message.data as Workspace;
-          setWorkspaces((prev) =>
-            prev.map((w) => (w.id === updated.id ? updated : w)),
-          );
-          if (activeWorkspaceId === updated.id) {
-            loadWorkspaceDetails(updated.id);
-          }
-          return;
-        }
-
-        if (operation === 'workspace.delete') {
-          const deletedId = message.data?.workspaceId;
-          setWorkspaces((prev) => {
-            const next = prev.filter((w) => w.id !== deletedId);
-            if (activeWorkspaceId === deletedId) {
-              const nextActive = next[0]?.id || null;
-              setActiveWorkspaceId(nextActive);
-              if (nextActive) loadWorkspaceDetails(nextActive);
-            }
-            return next;
-          });
-          setWorkspaceModalTab('workspaces');
-          return;
-        }
-
-        if (
-          operation === 'workspace.member.add' ||
-          operation === 'workspace.member.remove' ||
-          operation === 'workspace.member.updateRole'
-        ) {
-          if (activeWorkspaceId) {
-            loadWorkspaceDetails(activeWorkspaceId);
-          }
-          // Clear user search results on successful add
-          if (operation === 'workspace.member.add') {
-            setSearchResults([]);
-          }
-          return;
-        }
-
+        onWorkspaceResult(message);
         return;
       }
 
-      // 4. User search result
+      if (message.type === 'conversation.result') {
+        onConversationResult(message);
+        return;
+      }
+
       if (message.type === 'user.search.result') {
+        // Ignore results for anything but the most recent search.
+        const latest = latestSearch.current;
+        if (!latest || latest.requestId !== message.requestId) return;
         setSearchLoading(false);
+        setSearchedQuery(latest.query);
         if (message.ok) {
-          setSearchResults(
-            Array.isArray(message.data) ? message.data : [],
-          );
+          setSearchResults(Array.isArray(message.data) ? message.data : []);
         } else {
-          setWorkspaceError(
-            message.error?.message || 'Failed to search users.',
-          );
+          setSearchResults([]);
+          setNotice({ kind: 'error', text: message.error?.message || 'Failed to search users.' });
         }
         return;
       }
 
-      // 5. Chat tasks
+      // Chat task results
       if (
         message.type !== 'assistant.reply' &&
         message.type !== 'task.cancelled' &&
@@ -588,22 +681,24 @@ export default function App() {
         return;
       }
 
-      if (!pending.current || message.requestId !== pending.current.requestId) {
-        return;
-      }
+      if (!pending.current || message.requestId !== pending.current.requestId) return;
 
-      const sessionId = pending.current.sessionId;
+      const { conversationId } = pending.current;
       pending.current = null;
       setBusy(false);
 
       if (message.type === 'assistant.reply') {
-        addMessage(sessionId, {
-          id: createId(),
+        const exchange = message.data as MessageExchange | undefined;
+        addMessage(conversationId, {
+          id: exchange?.assistantMessage?.id ?? createId(),
           role: 'assistant',
-          text: message.text ?? 'No response was returned.',
+          text: exchange?.assistantMessage?.content ?? message.text ?? 'No response was returned.',
         });
+        if (exchange?.conversation && isSameScope(exchange.conversation.workspaceId, scopeRef.current)) {
+          setConversations((prev) => upsertConversation(prev, exchange.conversation));
+        }
       } else if (message.type === 'task.error') {
-        addMessage(sessionId, {
+        addMessage(conversationId, {
           id: createId(),
           role: 'assistant',
           text: `Something went wrong: ${message.text ?? 'Unknown error'}`,
@@ -612,13 +707,12 @@ export default function App() {
     }
 
     window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+    // Registered once; all mutable values are read through refs.
+  }, [selectScope]);
 
-    return () => {
-      window.removeEventListener('message', handleMessage);
-    };
-  }, [activeWorkspaceId]);
+  // ----------------------------------------------------------------- render
 
-  // 1. Initial Session Restoration Loading Screen
   if (authRestoring) {
     return (
       <div className="auth-container">
@@ -628,9 +722,7 @@ export default function App() {
           </div>
           <div className="auth-brand-text">
             <h1 className="auth-brand-title">SADS</h1>
-            <p className="auth-brand-subtitle">
-              Security-Aware Dependency Selection
-            </p>
+            <p className="auth-brand-subtitle">Security-Aware Dependency Selection</p>
           </div>
           <div className="auth-restore-indicator" role="status">
             <div className="loading-dot" />
@@ -641,7 +733,6 @@ export default function App() {
     );
   }
 
-  // 2. Unauthenticated: Render Login / Register screens
   if (!user) {
     return (
       <AuthScreen
@@ -661,83 +752,94 @@ export default function App() {
     );
   }
 
-  // 3. Authenticated: Render Chat application with Workspace Selector & Manager
+  const scopeLabel = activeWorkspace ? `Workspace · ${activeWorkspace.name}` : 'Personal chat';
+
   return (
     <div className="sads-app">
-      <ChatHeader
-        onNewChat={newChat}
-        user={user}
-        onLogout={handleLogout}
-      />
+      <ChatHeader onNewChat={newChat} user={user} onLogout={handleLogout} />
 
-      {/* Workspace Selector Bar */}
       <WorkspaceSelector
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
         activeRole={activeRole}
         loading={workspacesLoading}
-        onSelectWorkspace={handleSelectWorkspace}
+        error={workspacesError}
+        onSelectWorkspace={(id) => {
+          if (id !== activeWorkspaceId) selectScope(id);
+        }}
         onOpenManager={(tab) => {
+          setNotice(null);
           setWorkspaceModalTab(tab);
           setWorkspaceModalOpen(true);
         }}
       />
 
-      {/* Backend connection test */}
       <div className="backend-connection">
         <button type="button" onClick={testBackendConnection}>
           Test Backend Connection
         </button>
-
         <span role="status">{backendStatus}</span>
       </div>
 
       <div className="workspace">
         <SessionList
-          sessions={currentWorkspaceSessions}
-          activeSessionId={activeSessionId}
+          heading={activeWorkspace ? 'WORKSPACE CHATS' : 'PERSONAL CHATS'}
+          sessions={conversations}
+          activeSessionId={activeConversationId}
+          loading={conversationsLoading || !workspacesReady}
+          error={conversationsError}
+          disabled={busy}
+          canModify={(c) => canModifyConversation(user.id, c, activeRole)}
           onSelect={(id) => {
             if (pending.current) return;
-            setActiveSessionId(id);
+            selectConversation(id);
           }}
           onNewChat={newChat}
+          onRename={(conversationId, title) => post('conversation.rename', { conversationId, title })}
+          onDelete={(conversationId) => post('conversation.delete', { conversationId })}
+          onRetry={() => loadConversations(activeWorkspaceId)}
         />
 
         <div className="chat-panel">
-          <MessageList messages={messages} busy={busy} />
-          <PromptComposer
+          <MessageList
+            messages={messages}
             busy={busy}
-            onSend={sendPrompt}
-            onCancel={cancelRequest}
+            loadingHistory={historyLoadingId !== null && historyLoadingId === activeConversationId}
+            scopeLabel={scopeLabel}
           />
+          <PromptComposer busy={busy} onSend={sendPrompt} onCancel={cancelRequest} />
         </div>
       </div>
 
-      {/* Workspace Modal Dialog */}
       <WorkspaceModal
         isOpen={workspaceModalOpen}
         onClose={() => setWorkspaceModalOpen(false)}
         tab={workspaceModalTab}
         onTabChange={setWorkspaceModalTab}
         workspaces={workspaces}
+        workspacesLoading={workspacesLoading}
         activeWorkspaceId={activeWorkspaceId}
         activeWorkspaceDetails={activeWorkspaceDetails}
+        detailsLoading={detailsLoading}
         currentUserId={user.id}
-        loading={workspacesLoading}
-        onSelectWorkspace={handleSelectWorkspace}
+        loading={mutating}
+        onSelectWorkspace={selectScope}
         onCreateWorkspace={handleCreateWorkspace}
         onUpdateWorkspace={handleUpdateWorkspace}
         onDeleteWorkspace={handleDeleteWorkspace}
+        onLeaveWorkspace={() => handleRemoveMember(user.id, user.email)}
+        onTransferOwnership={handleTransferOwnership}
         onSearchUsers={handleSearchUsers}
         searchResults={searchResults}
         searchLoading={searchLoading}
-        onAddMember={handleAddWorkspaceMember}
-        onRemoveMember={handleRemoveWorkspaceMember}
-        onUpdateMemberRole={handleUpdateWorkspaceMemberRole}
+        searchedQuery={searchedQuery}
+        onAddMember={handleAddMember}
+        onRemoveMember={handleRemoveMember}
+        onUpdateMemberRole={handleUpdateMemberRole}
         detectedPath={detectedPath}
-        onRequestDetectPath={requestDetectPath}
-        errorMessage={workspaceError}
-        onClearError={() => setWorkspaceError(null)}
+        onRequestDetectPath={() => post('workspace.detectPath')}
+        notice={notice}
+        onClearNotice={() => setNotice(null)}
       />
     </div>
   );

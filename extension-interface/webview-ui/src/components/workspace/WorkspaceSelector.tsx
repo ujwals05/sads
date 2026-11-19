@@ -1,21 +1,29 @@
 import { useState, useRef, useEffect } from 'react';
 import {
+  Check,
   ChevronDown,
   FolderGit2,
   Plus,
   Settings,
+  User,
   Users,
-  Check,
 } from 'lucide-react';
-import type { Workspace, WorkspaceRole } from '../../types/workspace.ts';
+import type {
+  Workspace,
+  WorkspaceModalTab,
+  WorkspaceRole,
+} from '../../types/workspace.ts';
+import { ROLE_LABELS } from '../../lib/permissions.ts';
 
 interface WorkspaceSelectorProps {
   workspaces: Workspace[];
+  /** null = personal chats. */
   activeWorkspaceId: string | null;
-  activeRole?: WorkspaceRole;
+  activeRole?: WorkspaceRole | null;
   loading: boolean;
-  onSelectWorkspace: (workspaceId: string) => void;
-  onOpenManager: (tab: 'workspaces' | 'details' | 'members' | 'create') => void;
+  error?: string | null;
+  onSelectWorkspace: (workspaceId: string | null) => void;
+  onOpenManager: (tab: WorkspaceModalTab) => void;
 }
 
 export default function WorkspaceSelector({
@@ -23,6 +31,7 @@ export default function WorkspaceSelector({
   activeWorkspaceId,
   activeRole,
   loading,
+  error,
   onSelectWorkspace,
   onOpenManager,
 }: WorkspaceSelectorProps) {
@@ -40,14 +49,25 @@ export default function WorkspaceSelector({
         setDropdownOpen(false);
       }
     }
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') setDropdownOpen(false);
+    }
 
     if (dropdownOpen) {
       document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKey);
     }
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKey);
     };
   }, [dropdownOpen]);
+
+  const label = activeWorkspace
+    ? activeWorkspace.name
+    : activeWorkspaceId && loading
+      ? 'Loading workspace...'
+      : 'Personal chats';
 
   return (
     <div className="workspace-selector-container" ref={containerRef}>
@@ -60,18 +80,16 @@ export default function WorkspaceSelector({
           aria-expanded={dropdownOpen}
           aria-haspopup="listbox"
         >
-          <FolderGit2 size={15} className="ws-icon" />
+          {activeWorkspace ? (
+            <FolderGit2 size={15} className="ws-icon" />
+          ) : (
+            <User size={15} className="ws-icon" />
+          )}
           <div className="ws-text-group">
-            <span className="ws-name">
-              {activeWorkspace
-                ? activeWorkspace.name
-                : loading
-                ? 'Loading workspaces...'
-                : 'No workspace selected'}
-            </span>
-            {activeRole && (
+            <span className="ws-name">{label}</span>
+            {activeWorkspace && activeRole && (
               <span className={`ws-role-pill ws-role-${activeRole.toLowerCase()}`}>
-                {activeRole}
+                {ROLE_LABELS[activeRole]}
               </span>
             )}
           </div>
@@ -87,8 +105,8 @@ export default function WorkspaceSelector({
               type="button"
               className="icon-button"
               onClick={() => onOpenManager('members')}
-              title="Workspace Members"
-              aria-label="Workspace Members"
+              title="Workspace members"
+              aria-label="Workspace members"
             >
               <Users size={14} />
             </button>
@@ -96,8 +114,8 @@ export default function WorkspaceSelector({
               type="button"
               className="icon-button"
               onClick={() => onOpenManager('details')}
-              title="Workspace Settings"
-              aria-label="Workspace Settings"
+              title="Workspace details and settings"
+              aria-label="Workspace details and settings"
             >
               <Settings size={14} />
             </button>
@@ -105,16 +123,33 @@ export default function WorkspaceSelector({
         )}
       </div>
 
-      {/* Dropdown Menu */}
       {dropdownOpen && (
         <div className="workspace-dropdown-menu" role="listbox">
-          <div className="dropdown-section-title">Your Workspaces</div>
+          <button
+            type="button"
+            className={`dropdown-item ${activeWorkspaceId === null ? 'selected' : ''}`}
+            onClick={() => {
+              onSelectWorkspace(null);
+              setDropdownOpen(false);
+            }}
+            role="option"
+            aria-selected={activeWorkspaceId === null}
+          >
+            <User size={13} />
+            <span className="dropdown-item-name">Personal chats</span>
+            {activeWorkspaceId === null && <Check size={13} className="check-icon" />}
+          </button>
+
+          <div className="dropdown-divider" />
+          <div className="dropdown-section-title">Workspaces</div>
 
           <div className="dropdown-workspaces-list">
             {loading && workspaces.length === 0 ? (
               <div className="dropdown-empty">Loading workspaces...</div>
+            ) : error && workspaces.length === 0 ? (
+              <div className="dropdown-empty">{error}</div>
             ) : workspaces.length === 0 ? (
-              <div className="dropdown-empty">No workspaces found</div>
+              <div className="dropdown-empty">No workspaces yet</div>
             ) : (
               workspaces.map((ws) => {
                 const isSelected = ws.id === activeWorkspaceId;
@@ -132,6 +167,11 @@ export default function WorkspaceSelector({
                   >
                     <FolderGit2 size={13} />
                     <span className="dropdown-item-name">{ws.name}</span>
+                    {ws.role && (
+                      <span className={`ws-role-pill ws-role-${ws.role.toLowerCase()}`}>
+                        {ROLE_LABELS[ws.role]}
+                      </span>
+                    )}
                     {isSelected && <Check size={13} className="check-icon" />}
                   </button>
                 );
@@ -141,6 +181,17 @@ export default function WorkspaceSelector({
 
           <div className="dropdown-divider" />
 
+          <button
+            type="button"
+            className="dropdown-action-btn"
+            onClick={() => {
+              setDropdownOpen(false);
+              onOpenManager('workspaces');
+            }}
+          >
+            <FolderGit2 size={14} />
+            <span>Manage Workspaces</span>
+          </button>
           <button
             type="button"
             className="dropdown-action-btn"

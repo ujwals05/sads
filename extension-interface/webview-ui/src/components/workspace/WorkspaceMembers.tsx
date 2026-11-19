@@ -1,18 +1,20 @@
-import { useState } from 'react';
-import {
-  AlertCircle,
-  Crown,
-  Loader2,
-  Search,
-  Shield,
-  Trash2,
-  UserPlus,
-} from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Crown, Loader2, LogOut, Search, Shield, Trash2, UserPlus } from 'lucide-react';
 import type {
+  AssignableRole,
+  Notice,
   UserSearchResult,
   WorkspaceDetails,
   WorkspaceRole,
 } from '../../types/workspace.ts';
+import {
+  ROLE_LABELS,
+  assignableRolesFor,
+  canChangeRoleOf,
+  canManageMembers,
+  canRemove,
+} from '../../lib/permissions.ts';
+import NoticeBanner from './NoticeBanner.tsx';
 
 interface WorkspaceMembersProps {
   workspace: WorkspaceDetails;
@@ -21,11 +23,18 @@ interface WorkspaceMembersProps {
   onSearchUsers: (query: string) => void;
   searchResults: UserSearchResult[];
   searchLoading: boolean;
-  onAddMember: (userId: string, role: 'ADMIN' | 'DEVELOPER' | 'VIEWER') => void;
-  onRemoveMember: (userId: string) => void;
-  onUpdateRole: (userId: string, role: 'ADMIN' | 'DEVELOPER' | 'VIEWER') => void;
-  errorMessage: string | null;
-  onClearError: () => void;
+  searchedQuery: string;
+  onAddMember: (user: UserSearchResult, role: AssignableRole) => void;
+  onRemoveMember: (userId: string, email: string) => void;
+  onUpdateRole: (userId: string, email: string, role: AssignableRole) => void;
+  notice: Notice | null;
+  onClearNotice: () => void;
+}
+
+const SEARCH_DEBOUNCE_MS = 300;
+
+function roleBadgeClass(role: WorkspaceRole): string {
+  return `role-badge role-badge-${role.toLowerCase()}`;
 }
 
 export default function WorkspaceMembers({
@@ -35,58 +44,65 @@ export default function WorkspaceMembers({
   onSearchUsers,
   searchResults,
   searchLoading,
+  searchedQuery,
   onAddMember,
   onRemoveMember,
   onUpdateRole,
-  errorMessage,
-  onClearError,
+  notice,
+  onClearNotice,
 }: WorkspaceMembersProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedRole, setSelectedRole] = useState<'ADMIN' | 'DEVELOPER' | 'VIEWER'>('DEVELOPER');
+  const [selectedRole, setSelectedRole] = useState<AssignableRole>('MEMBER');
   const [activeTab, setActiveTab] = useState<'list' | 'add'>('list');
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
 
-  // Determine current user's role in this workspace
-  const currentUserMember = workspace.members.find((m) => m.userId === currentUserId);
-  const currentUserRole: WorkspaceRole = currentUserMember?.role || 'VIEWER';
+  const myRole: WorkspaceRole =
+    workspace.role ??
+    workspace.members.find((m) => m.userId === currentUserId)?.role ??
+    'MEMBER';
+  const actor = { userId: currentUserId, role: myRole };
+  const canManage = canManageMembers(myRole);
+  const grantableRoles = workspace.permissions?.assignableRoles ?? assignableRolesFor(myRole);
 
-  const isOwner = currentUserRole === 'OWNER';
-  const isAdmin = currentUserRole === 'ADMIN';
-  const canManage = isOwner || isAdmin;
+  // Keep the latest callback without re-triggering the debounce effect.
+  const searchRef = useRef(onSearchUsers);
+  useEffect(() => {
+    searchRef.current = onSearchUsers;
+  }, [onSearchUsers]);
 
-  // Filter out any users in searchResults that are already members
-  const memberUserIds = new Set(workspace.members.map((m) => m.userId));
-  const availableUsers = searchResults.filter((u) => !memberUserIds.has(u.id));
+  // Search as the user types (debounced); the backend also excludes members.
+  useEffect(() => {
+    if (activeTab !== 'add') return;
+    const q = searchQuery.trim();
+    if (q.length < 2) return;
+    const timer = setTimeout(() => searchRef.current(q), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery, activeTab]);
 
-  function handleSearchSubmit(e: React.FormEvent) {
+  // Defence in depth: never show existing members even if results are stale.
+  const memberIds = new Set(workspace.members.map((m) => m.userId));
+  const availableUsers = searchResults.filter((u) => !memberIds.has(u.id));
+  const showResultsFor = searchQuery.trim() && searchedQuery === searchQuery.trim();
+
+  function handleSearchSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!searchQuery.trim()) return;
-    onClearError();
-    onSearchUsers(searchQuery.trim());
-  }
-
-  function getRoleBadgeClass(role: WorkspaceRole): string {
-    switch (role) {
-      case 'OWNER':
-        return 'role-badge-owner';
-      case 'ADMIN':
-        return 'role-badge-admin';
-      case 'DEVELOPER':
-        return 'role-badge-dev';
-      case 'VIEWER':
-        return 'role-badge-viewer';
-    }
+    const q = searchQuery.trim();
+    if (!q) return;
+    onClearNotice();
+    onSearchUsers(q);
   }
 
   return (
     <div className="workspace-members-view">
-      {/* Subtabs: Current Members vs Add Member */}
-      <div className="members-subtabs">
+      <div className="members-subtabs" role="tablist">
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'list'}
           className={`subtab-btn ${activeTab === 'list' ? 'active' : ''}`}
           onClick={() => {
             setActiveTab('list');
-            onClearError();
+            onClearNotice();
           }}
         >
           <span>Members ({workspace.members.length})</span>
@@ -95,10 +111,12 @@ export default function WorkspaceMembers({
         {canManage && (
           <button
             type="button"
+            role="tab"
+            aria-selected={activeTab === 'add'}
             className={`subtab-btn ${activeTab === 'add' ? 'active' : ''}`}
             onClick={() => {
               setActiveTab('add');
-              onClearError();
+              onClearNotice();
             }}
           >
             <UserPlus size={13} />
@@ -107,41 +125,28 @@ export default function WorkspaceMembers({
         )}
       </div>
 
-      {errorMessage && (
-        <div className="auth-alert" role="alert">
-          <AlertCircle size={15} className="auth-alert-icon" />
-          <div className="auth-alert-content">
-            <span className="auth-alert-message">{errorMessage}</span>
-          </div>
-        </div>
-      )}
+      <NoticeBanner notice={notice} onDismiss={onClearNotice} />
 
-      {/* 1. Member List Tab */}
       {activeTab === 'list' && (
         <div className="members-list-container">
+          {!canManage && (
+            <p className="form-hint">
+              Only the workspace owner and admins can manage members.
+            </p>
+          )}
           <div className="members-table">
             {workspace.members.map((member) => {
               const isSelf = member.userId === currentUserId;
-              const isMemberOwner = member.role === 'OWNER';
-              const isMemberAdmin = member.role === 'ADMIN';
-
-              // Determine whether current user can remove this member
-              const canRemove =
-                (!isMemberOwner && isOwner) ||
-                (isAdmin && !isMemberOwner && !isMemberAdmin) ||
-                (isSelf && !isMemberOwner);
-
-              // Determine whether current user can change this member's role
-              const canEditRole =
-                !isMemberOwner &&
-                (isOwner || (isAdmin && !isMemberAdmin));
+              const email = member.user?.email || member.userId;
+              const editable = canChangeRoleOf(actor, member);
+              const removable = canRemove(actor, member);
 
               return (
                 <div key={member.userId} className="member-row">
                   <div className="member-info">
                     <div className="member-email-row">
-                      <span className="member-email" title={member.user?.email || member.userId}>
-                        {member.user?.email || member.userId}
+                      <span className="member-email" title={email}>
+                        {email}
                       </span>
                       {isSelf && <span className="self-tag">You</span>}
                     </div>
@@ -151,42 +156,67 @@ export default function WorkspaceMembers({
                   </div>
 
                   <div className="member-actions">
-                    {canEditRole ? (
-                      <select
-                        className="role-select"
-                        value={member.role}
-                        onChange={(e) =>
-                          onUpdateRole(
-                            member.userId,
-                            e.target.value as 'ADMIN' | 'DEVELOPER' | 'VIEWER',
-                          )
-                        }
-                        disabled={loading}
-                        aria-label={`Change role for ${member.user?.email || member.userId}`}
-                      >
-                        {isOwner && <option value="ADMIN">ADMIN</option>}
-                        <option value="DEVELOPER">DEVELOPER</option>
-                        <option value="VIEWER">VIEWER</option>
-                      </select>
+                    {confirmRemoveId === member.userId ? (
+                      <>
+                        <span className="confirm-inline">{isSelf ? 'Leave?' : 'Remove?'}</span>
+                        <button
+                          type="button"
+                          className="danger-btn compact-btn"
+                          disabled={loading}
+                          onClick={() => {
+                            setConfirmRemoveId(null);
+                            onRemoveMember(member.userId, email);
+                          }}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-btn compact-btn"
+                          onClick={() => setConfirmRemoveId(null)}
+                        >
+                          No
+                        </button>
+                      </>
                     ) : (
-                      <span className={`role-badge ${getRoleBadgeClass(member.role)}`}>
-                        {member.role === 'OWNER' && <Crown size={11} />}
-                        {member.role === 'ADMIN' && <Shield size={11} />}
-                        {member.role}
-                      </span>
-                    )}
+                      <>
+                        {editable ? (
+                          <select
+                            className="role-select"
+                            value={member.role}
+                            onChange={(e) =>
+                              onUpdateRole(member.userId, email, e.target.value as AssignableRole)
+                            }
+                            disabled={loading}
+                            aria-label={`Change role for ${email}`}
+                          >
+                            {grantableRoles.map((role) => (
+                              <option key={role} value={role}>
+                                {ROLE_LABELS[role]}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className={roleBadgeClass(member.role)}>
+                            {member.role === 'OWNER' && <Crown size={11} />}
+                            {member.role === 'ADMIN' && <Shield size={11} />}
+                            {ROLE_LABELS[member.role]}
+                          </span>
+                        )}
 
-                    {canRemove && (
-                      <button
-                        type="button"
-                        className="icon-button danger-icon"
-                        onClick={() => onRemoveMember(member.userId)}
-                        disabled={loading}
-                        title={isSelf ? 'Leave workspace' : 'Remove member'}
-                        aria-label={isSelf ? 'Leave workspace' : 'Remove member'}
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                        {removable && (
+                          <button
+                            type="button"
+                            className="icon-button danger-icon"
+                            onClick={() => setConfirmRemoveId(member.userId)}
+                            disabled={loading}
+                            title={isSelf ? 'Leave workspace' : 'Remove member'}
+                            aria-label={isSelf ? 'Leave workspace' : `Remove ${email}`}
+                          >
+                            {isSelf ? <LogOut size={13} /> : <Trash2 size={13} />}
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -196,20 +226,20 @@ export default function WorkspaceMembers({
         </div>
       )}
 
-      {/* 2. Add Member Tab */}
       {activeTab === 'add' && canManage && (
         <div className="add-member-container">
-          <form className="member-search-form" onSubmit={handleSearchSubmit}>
+          <form className="member-search-form" onSubmit={handleSearchSubmit} role="search">
             <div className="input-wrapper search-wrapper">
               <Search size={14} className="search-input-icon" />
               <input
                 type="text"
                 className="auth-input search-input"
-                placeholder="Search registered user email..."
+                placeholder="Search registered users by email…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                disabled={searchLoading}
                 autoFocus
+                maxLength={254}
+                aria-label="Search users by email"
               />
               <button
                 type="submit"
@@ -221,53 +251,31 @@ export default function WorkspaceMembers({
             </div>
           </form>
 
-          {/* Role selector for the user to be added */}
           <div className="add-role-selector">
-            <span className="add-role-label">Assign Role:</span>
+            <span className="add-role-label">Assign role:</span>
             <div className="role-options">
-              {isOwner && (
-                <label className="role-radio-label">
+              {grantableRoles.map((role) => (
+                <label key={role} className="role-radio-label">
                   <input
                     type="radio"
                     name="add-role"
-                    value="ADMIN"
-                    checked={selectedRole === 'ADMIN'}
-                    onChange={() => setSelectedRole('ADMIN')}
+                    value={role}
+                    checked={selectedRole === role}
+                    onChange={() => setSelectedRole(role)}
                   />
-                  <span>ADMIN</span>
+                  <span>{ROLE_LABELS[role]}</span>
                 </label>
-              )}
-              <label className="role-radio-label">
-                <input
-                  type="radio"
-                  name="add-role"
-                  value="DEVELOPER"
-                  checked={selectedRole === 'DEVELOPER'}
-                  onChange={() => setSelectedRole('DEVELOPER')}
-                />
-                <span>DEVELOPER</span>
-              </label>
-              <label className="role-radio-label">
-                <input
-                  type="radio"
-                  name="add-role"
-                  value="VIEWER"
-                  checked={selectedRole === 'VIEWER'}
-                  onChange={() => setSelectedRole('VIEWER')}
-                />
-                <span>VIEWER</span>
-              </label>
+              ))}
             </div>
           </div>
 
-          {/* Search Results */}
-          <div className="search-results-list">
+          <div className="search-results-list" aria-live="polite">
             {searchLoading ? (
               <div className="loading-state-box">
                 <Loader2 size={18} className="spinner-icon" />
                 <span>Searching registered users...</span>
               </div>
-            ) : availableUsers.length > 0 ? (
+            ) : showResultsFor && availableUsers.length > 0 ? (
               <div className="search-results-table">
                 {availableUsers.map((user) => (
                   <div key={user.id} className="search-result-row">
@@ -277,22 +285,24 @@ export default function WorkspaceMembers({
                     <button
                       type="button"
                       className="primary-action-btn"
-                      onClick={() => onAddMember(user.id, selectedRole)}
+                      onClick={() => onAddMember(user, selectedRole)}
                       disabled={loading}
                     >
                       <UserPlus size={13} />
-                      <span>Add as {selectedRole}</span>
+                      <span>Add as {ROLE_LABELS[selectedRole]}</span>
                     </button>
                   </div>
                 ))}
               </div>
-            ) : searchQuery.trim() ? (
+            ) : showResultsFor ? (
               <div className="empty-state-box">
-                <span>No eligible registered users found matching "{searchQuery}".</span>
+                <span>
+                  No registered users who aren't already members match "{searchQuery.trim()}".
+                </span>
               </div>
             ) : (
               <div className="empty-state-box">
-                <span>Type an email above to search registered SADS users.</span>
+                <span>Type at least 2 characters of an email to search registered SADS users.</span>
               </div>
             )}
           </div>

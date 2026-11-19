@@ -6,22 +6,39 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  /** Sender label for messages written by other workspace members. */
+  author?: string;
 }
 
 interface MessageListProps {
   messages: ChatMessage[];
   busy: boolean;
+  loadingHistory?: boolean;
+  scopeLabel?: string;
 }
 
 export default function MessageList({
   messages,
   busy,
+  loadingHistory = false,
+  scopeLabel,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy]);
+
+  if (loadingHistory && messages.length === 0) {
+    return (
+      <main className="conversation empty-conversation">
+        <div className="working-indicator" role="status">
+          <span className="loading-dot" />
+          Loading conversation…
+        </div>
+      </main>
+    );
+  }
 
   if (messages.length === 0) {
     return (
@@ -31,6 +48,7 @@ export default function MessageList({
         </div>
 
         <h2>What are we building?</h2>
+        {scopeLabel && <span className="scope-chip">{scopeLabel}</span>}
         <p>
           Describe your idea. SADS will help plan the implementation
           and evaluate dependencies before installation.
@@ -65,7 +83,7 @@ export default function MessageList({
 
           <div className="message-content">
             <div className="message-author">
-              {message.role === 'user' ? 'You' : 'SADS'}
+              {message.role === 'user' ? message.author ?? 'You' : 'SADS'}
             </div>
             <div className="message-text">{message.text}</div>
           </div>

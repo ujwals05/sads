@@ -1731,3 +1731,165 @@ textarea:focus-visible {
 }
 
 
+
+/* ------------------------------------------------------------------ */
+/* Workspace & member management additions                             */
+/* ------------------------------------------------------------------ */
+
+.ws-role-member,
+.role-badge-member {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.auth-alert.notice-success {
+  background: var(--vscode-inputValidation-infoBackground, rgba(16, 185, 129, 0.12));
+  border-color: var(--vscode-inputValidation-infoBorder, rgba(16, 185, 129, 0.45));
+  color: var(--vscode-foreground);
+}
+
+.auth-alert.notice-success .auth-alert-icon {
+  color: #34d399;
+}
+
+.auth-textarea {
+  resize: vertical;
+  min-height: 56px;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.ws-card-description {
+  font-size: 11px;
+  color: var(--vscode-foreground);
+  opacity: 0.85;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ws-card-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.inline-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-inline {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.confirm-actions.left {
+  justify-content: flex-start;
+}
+
+.scope-chip {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Session list: rows now hold a select button plus hover actions. */
+.session-item {
+  cursor: default;
+  padding: 0 4px 0 0;
+}
+
+.session-select {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-select:disabled {
+  cursor: not-allowed;
+}
+
+.session-actions {
+  display: none;
+  gap: 2px;
+}
+
+.session-item:hover .session-actions,
+.session-item:focus-within .session-actions {
+  display: inline-flex;
+}
+
+.session-action {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+
+.session-action:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.08));
+}
+
+.session-action.danger:hover {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.session-edit,
+.session-confirm {
+  padding: 4px 4px 4px 7px;
+  gap: 4px;
+}
+
+.session-confirm span {
+  flex: 1;
+}
+
+.session-title-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 4px;
+}
+
+.session-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  font-size: 11px;
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.session-error span {
+  flex: 1;
+}

@@ -198,13 +198,21 @@ export class ApiClient {
       ? ""
       : "/api/v1";
 
-    const normalizedPath = path.startsWith("/")
-      ? path
-      : `/${path}`;
+    // Split off the query string. Assigning "?" to URL.pathname would
+    // percent-encode it into the path (e.g. "/users/search%3Fq=..."),
+    // which previously broke every request that carried query parameters.
+    const queryIndex = path.indexOf("?");
+    const rawPath = queryIndex === -1 ? path : path.slice(0, queryIndex);
+    const rawQuery = queryIndex === -1 ? "" : path.slice(queryIndex + 1);
+
+    const normalizedPath = rawPath.startsWith("/")
+      ? rawPath
+      : `/${rawPath}`;
 
     if (
       normalizedPath.includes("#") ||
-      normalizedPath.includes("..")
+      normalizedPath.includes("..") ||
+      rawQuery.includes("#")
     ) {
       throw new ApiClientError(
         "Invalid API path.",
@@ -218,7 +226,7 @@ export class ApiClient {
         /\/+/, "/",
       );
 
-    baseUrl.search = "";
+    baseUrl.search = rawQuery ? `?${rawQuery}` : "";
     baseUrl.hash = "";
 
     return baseUrl.toString();

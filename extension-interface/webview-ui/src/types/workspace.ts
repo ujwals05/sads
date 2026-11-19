@@ -1,4 +1,7 @@
-export type WorkspaceRole = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+export type WorkspaceRole = 'OWNER' | 'ADMIN' | 'MEMBER';
+
+/** Roles that can be granted via add-member / change-role (never OWNER). */
+export type AssignableRole = 'ADMIN' | 'MEMBER';
 
 export interface WorkspaceMemberUser {
   id: string;
@@ -16,14 +19,31 @@ export interface WorkspaceMember {
 export interface Workspace {
   id: string;
   name: string;
-  rootPath: string;
+  description: string | null;
+  rootPath: string | null;
   createdById: string;
   createdAt: string;
   updatedAt: string;
+  role?: WorkspaceRole | null;
+  memberCount?: number;
+  conversationCount?: number;
+}
+
+export interface WorkspacePermissions {
+  canUpdate: boolean;
+  canDelete: boolean;
+  assignableRoles: AssignableRole[];
 }
 
 export interface WorkspaceDetails extends Workspace {
   members: WorkspaceMember[];
+  permissions?: WorkspacePermissions;
+}
+
+export interface WorkspaceInput {
+  name: string;
+  description: string | null;
+  rootPath: string | null;
 }
 
 export interface UserSearchResult {
@@ -36,4 +56,11 @@ export interface PaginationMeta {
   limit: number;
   total: number;
   totalPages: number;
+}
+
+export type WorkspaceModalTab = 'workspaces' | 'details' | 'members' | 'create';
+
+export interface Notice {
+  kind: 'success' | 'error';
+  text: string;
 }

@@ -21,7 +21,7 @@
       "properties": {
         "sads.backendUrl": {
           "type": "string",
-          "default": "http://localhost:5000",
+          "default": "http://localhost:5001",
           "description": "Base URL of the SADS backend API."
         }
       }
